@@ -79,8 +79,6 @@ curl -X POST http://127.0.0.1:8090/auth/submit-password \
 - `LOGZZ_TELEGRAM__*`
 - `DOWNLOADER_*`
 
-Поддержка `config.yaml` в бинарниках сохранена только как опциональный override для ручного запуска вне compose.
-
 Если нужно начать авторизацию `downloader` с нуля:
 
 ```bash
