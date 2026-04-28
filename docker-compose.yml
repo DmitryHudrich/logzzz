@@ -43,7 +43,6 @@ services:
       LOGZZ_TELEGRAM__MAX_RESULTS: ${LOGZZ_TELEGRAM_MAX_RESULTS:-50}
     volumes:
       - ./.local:/app/.local
-      - ./config.yaml:/app/config.yaml:ro
       - ./migrations:/app/migrations:ro
     restart: unless-stopped
 
@@ -69,5 +68,4 @@ services:
       - "${DOWNLOADER_REST_PORT:-8090}:8090"
     volumes:
       - ./.local:/app/.local
-      - ./config.yaml:/app/config.yaml:ro
     restart: unless-stopped

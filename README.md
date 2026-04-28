@@ -67,11 +67,19 @@ curl -X POST http://127.0.0.1:8090/auth/submit-password \
 
 `yaml < cli < env`
 
-Основной файл:
+`config.yaml` больше не нужен для стандартного запуска. Базовый сценарий полностью работает через `.env`, переменные окружения и runtime-дефолты.
 
-- [config.yaml](/home/eblan/work/3301/logzz/config.yaml)
+`docker compose` подставляет все основные runtime-пути и секреты через env:
 
-Compose поверх него задаёт runtime-пути и секреты через env.
+- `LOGZZ_CLICKHOUSE__*`
+- `LOGZZ_MIGRATIONS_DIR`
+- `LOGZZ_INPUT_DIR`
+- `LOGZZ_ARCHIVE_DIR`
+- `LOGZZ_POLL_INTERVAL_SECS`
+- `LOGZZ_TELEGRAM__*`
+- `DOWNLOADER_*`
+
+Поддержка `config.yaml` в бинарниках сохранена только как опциональный override для ручного запуска вне compose.
 
 Если нужно начать авторизацию `downloader` с нуля:
 

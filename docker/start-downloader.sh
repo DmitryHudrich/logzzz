@@ -8,4 +8,4 @@ if [ -z "${DOWNLOADER_PEER_NAME:-}" ] || [ -z "${DOWNLOADER_API_ID:-}" ] || [ -z
   exec sleep infinity
 fi
 
-exec /usr/local/bin/downloader --config /app/config.yaml
+exec /usr/local/bin/downloader

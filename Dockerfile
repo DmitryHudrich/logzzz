@@ -14,9 +14,7 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/logzz /usr/local/bin/logzz
 COPY --from=builder /app/target/release/downloader /usr/local/bin/downloader
-COPY config.yaml /app/config.yaml
 COPY migrations /app/migrations
 COPY docker /app/docker
 
 RUN chmod +x /app/docker/*.sh
-
