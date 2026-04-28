@@ -1,0 +1,25 @@
+[package]
+name = "logzz"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+regex = "1"
+walkdir = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+sha2 = "0"
+hex = "0"
+clickhouse = "0"
+tokio = { version = "1", features = ["full"] }
+eyre = "0"
+teloxide = { version = "0", features = ["macros"] }
+time = "0"
+dashmap = "6"
+rand = "0"
+zip = "2"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+serde_yaml = "0.9"

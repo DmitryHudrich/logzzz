@@ -1,0 +1,7 @@
+**/target
+**/input
+/reports
+/test-files
+/.local/
+/.env
+/config.yaml

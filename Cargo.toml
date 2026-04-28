@@ -1,0 +1,3 @@
+[workspace]
+members = ["downloader","logzz"]
+resolver = "3"

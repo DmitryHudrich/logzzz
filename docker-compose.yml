@@ -1,0 +1,73 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-logzz}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-app}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-app_password}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+    volumes:
+      - ./.local/clickhouse:/var/lib/clickhouse
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - clickhouse-client --user "$$CLICKHOUSE_USER" --password "$$CLICKHOUSE_PASSWORD" --query "SELECT 1" >/dev/null 2>&1
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  logzz:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    command: ["/app/docker/start-logzz.sh"]
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,teloxide=warn}
+      LOGZZ_CLICKHOUSE__URL: http://clickhouse:8123
+      LOGZZ_CLICKHOUSE__USER: ${CLICKHOUSE_USER:-app}
+      LOGZZ_CLICKHOUSE__PASSWORD: ${CLICKHOUSE_PASSWORD:-app_password}
+      LOGZZ_CLICKHOUSE__DATABASE: ${CLICKHOUSE_DB:-logzz}
+      LOGZZ_CLICKHOUSE__APP_DATABASE: ${CLICKHOUSE_APP_DB:-logzz}
+      LOGZZ_MIGRATIONS_DIR: /app/migrations
+      LOGZZ_INPUT_DIR: /app/.local/input
+      LOGZZ_ARCHIVE_DIR: /app/.local/archives
+      LOGZZ_POLL_INTERVAL_SECS: ${LOGZZ_POLL_INTERVAL_SECS:-5}
+      LOGZZ_TELEGRAM__TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      LOGZZ_TELEGRAM__RESULTS_DIR: /app/.local/reports
+      LOGZZ_TELEGRAM__MAX_RESULTS: ${LOGZZ_TELEGRAM_MAX_RESULTS:-50}
+    volumes:
+      - ./.local:/app/.local
+      - ./config.yaml:/app/config.yaml:ro
+      - ./migrations:/app/migrations:ro
+    restart: unless-stopped
+
+  downloader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    command: ["/app/docker/start-downloader.sh"]
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,teloxide=warn}
+      DOWNLOADER_PEER_NAME: ${DOWNLOADER_PEER_NAME:-}
+      DOWNLOADER_ARCHIVE_DIR: /app/.local/archives
+      DOWNLOADER_STATE_FILE: /app/.local/downloader/downloader.state.json
+      DOWNLOADER_SESSION_FILE: /app/.local/downloader/downloader.session
+      DOWNLOADER_POLL_INTERVAL_SECS: ${DOWNLOADER_POLL_INTERVAL_SECS:-5}
+      DOWNLOADER_REST_LISTEN_ADDR: ${DOWNLOADER_REST_LISTEN_ADDR:-0.0.0.0:8090}
+      DOWNLOADER_API_ID: ${DOWNLOADER_API_ID:-}
+      DOWNLOADER_API_HASH: ${DOWNLOADER_API_HASH:-}
+    ports:
+      - "${DOWNLOADER_REST_PORT:-8090}:8090"
+    volumes:
+      - ./.local:/app/.local
+      - ./config.yaml:/app/config.yaml:ro
+    restart: unless-stopped
