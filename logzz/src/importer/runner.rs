@@ -9,13 +9,18 @@ use teloxide::types::ChatId;
 use tokio::fs;
 use tracing::{debug, error, info, warn};
 
-use crate::archive::{archive_output_dir, extract_archive, is_archive_file};
+use crate::archive::{
+    archive_needs_password_path, archive_output_dir, archive_password_path, extract_archive,
+    is_archive_file, ExtractError,
+};
 use crate::migrate;
 use crate::parser::parse_file;
 use crate::telegram::{
     ArchiveParseSummary, archive_path_from_upload_request, format_ready_notification,
-    load_pending_notifications, load_upload_request, load_upload_request_file,
-    queue_pending_parse_notification, remove_upload_request, save_pending_notification,
+    load_pending_notifications, load_upload_request,
+    load_upload_request_file, queue_pending_parse_notification, remove_needs_password_marker,
+    remove_upload_request, save_needs_password_marker, save_pending_notification,
+    scan_needs_password_archives, write_needs_password_marker,
 };
 
 use super::db::{
@@ -106,6 +111,16 @@ pub async fn start(
         }
 
         if let Some(bot) = telegram_bot.as_ref() {
+            match flush_password_request_notifications(bot, &archive_dir).await {
+                Ok(sent) if sent > 0 => {
+                    info!(sent, "telegram needs-password notifications delivered");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(error = %error, "failed to flush needs-password notifications");
+                }
+            }
+
             match flush_ready_notifications(bot, &archive_dir).await {
                 Ok(sent) if sent > 0 => {
                     info!(sent, "telegram archive notifications delivered");
@@ -290,18 +305,51 @@ async fn process_pending_archives(
     let mut extracted = vec![];
 
     for archive_path in archives {
-        info!(archive_path = %archive_path.display(), "extracting archive");
+        let needs_password_path = archive_needs_password_path(&archive_path);
+        let pass_path = archive_password_path(&archive_path);
+
+        let password_str: Option<String> = if pass_path.exists() {
+            match fs::read_to_string(&pass_path).await {
+                Ok(s) => Some(s.trim().to_string()),
+                Err(e) => {
+                    warn!(error = %e, pass_path = %pass_path.display(), "failed to read password file");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // If already waiting for a password and none has been provided yet, skip
+        if needs_password_path.exists() && password_str.is_none() {
+            debug!(archive_path = %archive_path.display(), "skipping password-protected archive awaiting password");
+            continue;
+        }
+
+        info!(
+            archive_path = %archive_path.display(),
+            has_password = password_str.is_some(),
+            "extracting archive"
+        );
 
         let archive_path_for_task = archive_path.clone();
         let output_root = input_dir.clone();
+        let password_for_task = password_str.clone();
         let extract_result = tokio::task::spawn_blocking(move || {
-            extract_archive(&archive_path_for_task, &output_root)
+            extract_archive(
+                &archive_path_for_task,
+                &output_root,
+                password_for_task.as_deref(),
+            )
         })
         .await;
 
         match extract_result {
             Ok(Ok(stats)) => {
                 fs::remove_file(&archive_path).await?;
+                if let Err(e) = remove_needs_password_marker(&archive_path).await {
+                    warn!(error = %e, "failed to remove needs-password marker");
+                }
                 if let Err(error) =
                     promote_upload_request_to_pending(archive_dir, &archive_path, &stats.output_dir)
                         .await
@@ -320,6 +368,28 @@ async fn process_pending_archives(
                     files_extracted = stats.files_extracted,
                     "archive extracted and deleted"
                 );
+            }
+            Ok(Err(ExtractError::PasswordRequired)) => {
+                info!(
+                    archive_path = %archive_path.display(),
+                    "archive requires a password; waiting for password file"
+                );
+                // Only write marker if it doesn't exist yet (avoid resetting notification_sent)
+                if !needs_password_path.exists() {
+                    let original_name = archive_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("archive")
+                        .to_string();
+                    if let Ok(Some(request)) = load_upload_request(&archive_path).await {
+                        if let Err(e) =
+                            write_needs_password_marker(&archive_path, &original_name, request)
+                                .await
+                        {
+                            warn!(error = %e, "failed to write needs-password marker");
+                        }
+                    }
+                }
             }
             Ok(Err(error)) => {
                 warn!(
@@ -397,6 +467,46 @@ async fn recover_orphaned_upload_requests(archive_dir: &Path, input_dir: &Path) 
     }
 
     Ok(())
+}
+
+async fn flush_password_request_notifications(bot: &Bot, archive_dir: &Path) -> Result<usize> {
+    let mut sent = 0usize;
+
+    for (archive_path, mut marker) in scan_needs_password_archives(archive_dir).await? {
+        if marker.notification_sent {
+            continue;
+        }
+
+        let Some(chat_id) = marker.request.bot_chat_id() else {
+            continue;
+        };
+
+        let message = format!(
+            "Archive '{}' requires a password to extract.\n\
+             Reply to the original archive message with the password.",
+            marker.archive_name
+        );
+
+        match bot.send_message(ChatId(chat_id), message).await {
+            Ok(_) => {
+                marker.notification_sent = true;
+                if let Err(e) = save_needs_password_marker(&archive_path, &marker).await {
+                    warn!(error = %e, "failed to update needs-password marker");
+                }
+                sent += 1;
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    archive_path = %archive_path.display(),
+                    chat_id,
+                    "failed to deliver needs-password notification"
+                );
+            }
+        }
+    }
+
+    Ok(sent)
 }
 
 async fn flush_ready_notifications(bot: &Bot, archive_dir: &Path) -> Result<usize> {

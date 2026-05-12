@@ -8,7 +8,10 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::{error, info, warn};
 
-use crate::archive::{build_archive_filename, detect_archive_kind, partial_archive_path};
+use crate::archive::{
+    archive_password_path, build_archive_filename, detect_archive_kind, find_archive_by_message_id,
+    partial_archive_path,
+};
 use crate::telegram::{ArchiveUploadRequest, remove_upload_request, write_upload_request};
 
 use super::state::BotState;
@@ -119,6 +122,62 @@ pub async fn handle_document(bot: Bot, msg: Message, state: Arc<BotState>) -> Re
                 ""
             }
         ),
+    )
+    .await?;
+
+    Ok(())
+}
+
+pub async fn handle_password_reply(
+    bot: Bot,
+    msg: Message,
+    state: Arc<BotState>,
+) -> ResponseResult<()> {
+    let text = match msg.text() {
+        Some(t) => t.trim().to_string(),
+        None => return Ok(()),
+    };
+
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    let replied_msg = match msg.reply_to_message() {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+
+    let reply_to_id = replied_msg.id.0;
+    let archive_dir = PathBuf::from(&state.archive_dir);
+
+    let archive_path = match find_archive_by_message_id(&archive_dir, reply_to_id) {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    let pass_path = archive_password_path(&archive_path);
+
+    if let Err(e) = fs::write(&pass_path, text.as_bytes()).await {
+        error!(error = %e, pass_path = %pass_path.display(), "failed to save archive password");
+        bot.send_message(msg.chat.id, format!("Failed to save password: {e}"))
+            .await?;
+        return Ok(());
+    }
+
+    let archive_name = archive_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("archive");
+
+    info!(
+        archive_name,
+        message_id = reply_to_id,
+        "saved archive password from reply"
+    );
+
+    bot.send_message(
+        msg.chat.id,
+        format!("Password saved for `{archive_name}`. The archive will be extracted shortly."),
     )
     .await?;
 

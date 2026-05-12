@@ -6,6 +6,7 @@ use tokio::fs;
 use crate::archive::sanitize_filename;
 
 pub const ARCHIVE_UPLOAD_REQUEST_SUFFIX: &str = ".logzz-upload.json";
+pub const ARCHIVE_NEEDS_PASSWORD_SUFFIX: &str = ".needs-password";
 const PENDING_NOTIFICATION_DIR: &str = ".logzz-telegram";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -94,6 +95,88 @@ impl PendingArchiveNotification {
     pub fn is_ready(&self) -> bool {
         self.summary.is_some()
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeedsPasswordMarker {
+    pub archive_name: String,
+    pub request: ArchiveUploadRequest,
+    pub notification_sent: bool,
+}
+
+pub fn archive_needs_password_path(archive_path: &Path) -> PathBuf {
+    let file_name = archive_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| format!("{name}{ARCHIVE_NEEDS_PASSWORD_SUFFIX}"))
+        .unwrap_or_else(|| format!("archive{ARCHIVE_NEEDS_PASSWORD_SUFFIX}"));
+    archive_path.with_file_name(file_name)
+}
+
+pub async fn write_needs_password_marker(
+    archive_path: &Path,
+    archive_name: &str,
+    request: ArchiveUploadRequest,
+) -> Result<()> {
+    let marker = NeedsPasswordMarker {
+        archive_name: archive_name.to_string(),
+        request,
+        notification_sent: false,
+    };
+    write_json_file(&archive_needs_password_path(archive_path), &marker).await
+}
+
+pub async fn load_needs_password_marker(
+    archive_path: &Path,
+) -> Result<Option<NeedsPasswordMarker>> {
+    load_json_file(&archive_needs_password_path(archive_path)).await
+}
+
+pub async fn save_needs_password_marker(
+    archive_path: &Path,
+    marker: &NeedsPasswordMarker,
+) -> Result<()> {
+    write_json_file(&archive_needs_password_path(archive_path), marker).await
+}
+
+pub async fn remove_needs_password_marker(archive_path: &Path) -> Result<()> {
+    remove_optional_file(&archive_needs_password_path(archive_path)).await
+}
+
+pub async fn scan_needs_password_archives(
+    archive_dir: &Path,
+) -> Result<Vec<(PathBuf, NeedsPasswordMarker)>> {
+    let mut reader = match fs::read_dir(archive_dir).await {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut result = Vec::new();
+    while let Some(entry) = reader.next_entry().await? {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        if !name.ends_with(ARCHIVE_NEEDS_PASSWORD_SUFFIX) {
+            continue;
+        }
+        let archive_name = name
+            .strip_suffix(ARCHIVE_NEEDS_PASSWORD_SUFFIX)
+            .unwrap_or(&name)
+            .to_string();
+        let archive_path = path.with_file_name(&archive_name);
+        if let Some(marker) = load_json_file::<NeedsPasswordMarker>(&path).await? {
+            result.push((archive_path, marker));
+        }
+    }
+
+    result.sort_by(|(a, _), (b, _)| a.cmp(b));
+    Ok(result)
 }
 
 pub fn upload_request_path(archive_path: &Path) -> PathBuf {

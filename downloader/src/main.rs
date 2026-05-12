@@ -8,11 +8,15 @@ use grammers_client::media::Media;
 use grammers_client::{Client, SignInError};
 use grammers_mtsender::SenderPool;
 use grammers_session::storages::SqliteSession;
-use logzz::archive::{build_archive_filename, detect_archive_kind, partial_archive_path};
+use logzz::archive::{
+    archive_password_path, build_archive_filename, detect_archive_kind, find_archive_by_message_id,
+    partial_archive_path,
+};
 use logzz::config::{DownloaderCli, DownloaderConfig, load_downloader_config};
 use logzz::telegram::{
     ArchiveUploadRequest, format_ready_notification, load_pending_notifications,
-    remove_upload_request, write_upload_request,
+    remove_upload_request, save_needs_password_marker, scan_needs_password_archives,
+    write_upload_request,
 };
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -201,6 +205,16 @@ async fn async_main() -> Result<()> {
             Err(error) => {
                 error!(error = %error, "archive sync failed");
                 resolved_peer = None;
+            }
+        }
+
+        match flush_needs_password_notifications(&client, peer, &cfg.peer_name, &archive_dir).await {
+            Ok(sent) if sent > 0 => {
+                info!(sent, "needs-password notifications delivered to userbot");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %error, "failed to flush needs-password notifications");
             }
         }
 
@@ -532,6 +546,7 @@ async fn sync_new_archives(
 ) -> Result<usize> {
     let mut messages = client.iter_messages(peer);
     let mut archive_message_ids = Vec::new();
+    let mut password_replies: Vec<(i32, String)> = Vec::new();
 
     while let Some(msg) = messages.next().await? {
         if msg.id() <= state.last_downloaded_archive_message_id {
@@ -542,6 +557,34 @@ async fn sync_new_archives(
             let file_name = document.name().unwrap_or_default();
             if is_archive_name(file_name) {
                 archive_message_ids.push(msg.id());
+            }
+        } else {
+            let text = msg.text();
+            if !text.is_empty() {
+                if let Some(reply_to_id) = msg.reply_to_message_id() {
+                    password_replies.push((reply_to_id, text.trim().to_string()));
+                }
+            }
+        }
+    }
+
+    // Save passwords from replies before downloading new archives
+    for (reply_to_id, password_text) in password_replies {
+        if let Some(archive_path) = find_archive_by_message_id(archive_dir, reply_to_id) {
+            let pass_path = archive_password_path(&archive_path);
+            if let Err(e) = tokio::fs::write(&pass_path, password_text.as_bytes()).await {
+                warn!(
+                    error = %e,
+                    reply_to_id,
+                    pass_path = %pass_path.display(),
+                    "failed to save archive password from reply"
+                );
+            } else {
+                info!(
+                    reply_to_id,
+                    archive_path = %archive_path.display(),
+                    "saved archive password from reply"
+                );
             }
         }
     }
@@ -639,6 +682,51 @@ async fn sync_new_archives(
     }
 
     Ok(downloaded)
+}
+
+async fn flush_needs_password_notifications(
+    client: &Client,
+    peer: grammers_session::types::PeerRef,
+    peer_name: &str,
+    archive_dir: &Path,
+) -> Result<usize> {
+    let mut sent = 0usize;
+
+    for (archive_path, mut marker) in scan_needs_password_archives(archive_dir).await? {
+        if marker.notification_sent {
+            continue;
+        }
+
+        let Some(_) = marker.request.userbot_progress_message_id(peer_name) else {
+            continue;
+        };
+
+        let message = format!(
+            "Archive '{}' requires a password to extract.\n\
+             Reply to the forwarded archive message with the password.",
+            marker.archive_name
+        );
+
+        match client.send_message(peer, message).await {
+            Ok(_) => {
+                marker.notification_sent = true;
+                if let Err(e) = save_needs_password_marker(&archive_path, &marker).await {
+                    warn!(error = %e, "failed to update needs-password marker");
+                }
+                sent += 1;
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    archive_path = %archive_path.display(),
+                    peer_name,
+                    "failed to deliver needs-password notification to userbot peer"
+                );
+            }
+        }
+    }
+
+    Ok(sent)
 }
 
 async fn flush_parse_notifications(
