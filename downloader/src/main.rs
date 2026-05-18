@@ -6,7 +6,7 @@ use clap::Parser;
 use grammers_client::client::{LoginToken, PasswordToken};
 use grammers_client::media::Media;
 use grammers_client::{Client, SignInError};
-use grammers_mtsender::SenderPool;
+use grammers_mtsender::{ConnectionParams, SenderPool};
 use grammers_session::storages::SqliteSession;
 use logzz::archive::{
     archive_password_path, build_archive_filename, detect_archive_kind, find_archive_by_message_id,
@@ -38,8 +38,14 @@ struct DownloaderState {
 
 enum AuthPhase {
     AwaitingPhone,
-    AwaitingCode { phone: String, token: LoginToken },
-    AwaitingPassword { hint: Option<String>, token: PasswordToken },
+    AwaitingCode {
+        phone: String,
+        token: LoginToken,
+    },
+    AwaitingPassword {
+        hint: Option<String>,
+        token: PasswordToken,
+    },
     Authorized,
 }
 
@@ -208,7 +214,8 @@ async fn async_main() -> Result<()> {
             }
         }
 
-        match flush_needs_password_notifications(&client, peer, &cfg.peer_name, &archive_dir).await {
+        match flush_needs_password_notifications(&client, peer, &cfg.peer_name, &archive_dir).await
+        {
             Ok(sent) if sent > 0 => {
                 info!(sent, "needs-password notifications delivered to userbot");
             }
@@ -443,16 +450,11 @@ async fn reset_auth(State(state): State<AppState>) -> (StatusCode, Json<ApiRespo
     api_ok("authorization flow reset")
 }
 
-fn build_auth_status_response(
-    cfg: &DownloaderConfig,
-    auth: &AuthFlowState,
-) -> AuthStatusResponse {
+fn build_auth_status_response(cfg: &DownloaderConfig, auth: &AuthFlowState) -> AuthStatusResponse {
     let (status, phone, password_hint) = match &auth.phase {
         AuthPhase::AwaitingPhone => ("awaiting_phone", None, None),
         AuthPhase::AwaitingCode { phone, .. } => ("awaiting_code", Some(phone.clone()), None),
-        AuthPhase::AwaitingPassword { hint, .. } => {
-            ("awaiting_password", None, hint.clone())
-        }
+        AuthPhase::AwaitingPassword { hint, .. } => ("awaiting_password", None, hint.clone()),
         AuthPhase::Authorized => ("authorized", None, None),
     };
 
@@ -516,7 +518,12 @@ async fn ensure_client(state: &AppState) -> Result<Arc<Client>> {
 
 async fn initialize_client(cfg: &DownloaderConfig, session_path: &Path) -> Result<Arc<Client>> {
     let session = Arc::new(SqliteSession::open(session_path).await?);
-    let SenderPool { runner, handle, .. } = SenderPool::new(Arc::clone(&session), cfg.api_id);
+    let params = ConnectionParams {
+        proxy_url: cfg.socks_proxy.clone(),
+        ..Default::default()
+    };
+    let SenderPool { runner, handle, .. } =
+        SenderPool::with_configuration(Arc::clone(&session), cfg.api_id, params);
     let client = Arc::new(Client::new(handle));
     tokio::spawn(runner.run());
     Ok(client)

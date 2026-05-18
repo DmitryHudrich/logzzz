@@ -4,6 +4,7 @@ use eyre::Result;
 use std::sync::Arc;
 use std::time::Duration;
 use teloxide::Bot;
+use teloxide::net::default_reqwest_settings;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -35,7 +36,16 @@ async fn main() -> Result<()> {
     let telegram_bot = if cfg.telegram.token.is_empty() {
         None
     } else {
-        Some(Bot::new(cfg.telegram.token.clone()))
+        Some({
+            let client = if let Some(proxy) = cli.proxy {
+                default_reqwest_settings()
+                    .proxy(reqwest::Proxy::all(&proxy)?)
+                    .build()?
+            } else {
+                default_reqwest_settings().build()?
+            };
+            Bot::with_client(cfg.telegram.token.clone(), client)
+        })
     };
 
     if telegram_bot.is_none() {

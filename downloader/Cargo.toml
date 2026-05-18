@@ -10,7 +10,7 @@ grammers-client = "0.9"
 grammers-session = "0.9"
 mime = "0.3"
 mime_guess = "2"
-grammers-mtsender = "0.9"
+grammers-mtsender = { version = "0.9", features = ["proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"

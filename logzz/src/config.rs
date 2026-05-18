@@ -43,6 +43,8 @@ pub struct Cli {
     pub results_dir: Option<String>,
     #[arg(long)]
     pub max_results: Option<usize>,
+    #[arg(long)]
+    pub proxy: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -66,6 +68,8 @@ pub struct DownloaderCli {
     pub api_id: Option<i32>,
     #[arg(long)]
     pub api_hash: Option<String>,
+    #[arg(long)]
+    pub proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -104,6 +108,7 @@ pub struct DownloaderConfig {
     pub rest_listen_addr: String,
     pub api_id: i32,
     pub api_hash: String,
+    pub socks_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -320,6 +325,7 @@ fn build_downloader_config(
     );
 
     Ok(DownloaderConfig {
+        socks_proxy: cli.proxy.clone(),
         peer_name: peer_name.clone(),
         archive_dir,
         state_file: pick_first(
@@ -506,6 +512,7 @@ mod tests {
             telegram_token: Some("cli-token".to_string()),
             results_dir: None,
             max_results: Some(23),
+            proxy: None,
         };
         let env = LogzzEnv {
             clickhouse_url: Some("http://env:8123".to_string()),
@@ -539,6 +546,7 @@ mod tests {
             rest_listen_addr: Some("127.0.0.1:29090".to_string()),
             api_id: None,
             api_hash: None,
+            proxy: None,
         };
         let env = DownloaderEnv {
             archive_dir: Some("./env-archives".to_string()),
@@ -572,6 +580,7 @@ mod tests {
             rest_listen_addr: None,
             api_id: Some(1),
             api_hash: Some("hash".to_string()),
+            proxy: None,
         };
         let mut file = sample_file_config();
         file.downloader = Some(PartialDownloaderConfig {
@@ -598,6 +607,7 @@ mod tests {
                 ..FileConfig::default()
             },
             &Cli {
+                proxy: None,
                 config: DEFAULT_CONFIG_PATH.to_string(),
                 clickhouse_url: None,
                 clickhouse_user: None,
@@ -636,6 +646,7 @@ mod tests {
                 rest_listen_addr: None,
                 api_id: Some(1),
                 api_hash: Some("hash".to_string()),
+                proxy: None,
             },
             DownloaderEnv::default(),
         )
