@@ -41,6 +41,7 @@ services:
       LOGZZ_TELEGRAM__TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       LOGZZ_TELEGRAM__RESULTS_DIR: /app/.local/reports
       LOGZZ_TELEGRAM__MAX_RESULTS: ${LOGZZ_TELEGRAM_MAX_RESULTS:-50}
+      # LOGZZ_TELEGRAM__SOCKS: "socks5://127.0.0.1:1234"
     volumes:
       - ./.local:/app/.local
       - ./migrations:/app/migrations:ro
@@ -64,6 +65,7 @@ services:
       DOWNLOADER_REST_LISTEN_ADDR: ${DOWNLOADER_REST_LISTEN_ADDR:-0.0.0.0:8090}
       DOWNLOADER_API_ID: ${DOWNLOADER_API_ID:-}
       DOWNLOADER_API_HASH: ${DOWNLOADER_API_HASH:-}
+      # DOWNLOADER_TELEGRAM__SOCKS: "socks5://127.0.0.1:1234"
     ports:
       - "${DOWNLOADER_REST_PORT:-8090}:8090"
     volumes:

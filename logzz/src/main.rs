@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
         None
     } else {
         Some({
-            let client = if let Some(proxy) = cli.proxy {
+            let client = if let Some(proxy) = cfg.socks_proxy {
                 default_reqwest_settings()
                     .proxy(reqwest::Proxy::all(&proxy)?)
                     .build()?

@@ -80,6 +80,7 @@ pub struct AppConfig {
     pub archive_dir: String,
     pub poll_interval_secs: u64,
     pub telegram: TelegramConfig,
+    pub socks_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -164,6 +165,7 @@ struct LogzzEnv {
     telegram_token: Option<String>,
     results_dir: Option<String>,
     max_results: Option<usize>,
+    socks: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -176,6 +178,7 @@ struct DownloaderEnv {
     rest_listen_addr: Option<String>,
     api_id: Option<i32>,
     api_hash: Option<String>,
+    socks: Option<String>,
 }
 
 pub fn load_config(cli: &Cli) -> Result<AppConfig> {
@@ -248,6 +251,7 @@ fn build_app_config(file: FileConfig, cli: &Cli, env: LogzzEnv) -> Result<AppCon
     };
 
     Ok(AppConfig {
+        socks_proxy: pick_first([Some(env.socks), Some(cli.proxy.clone())], || None),
         clickhouse,
         migrations_dir: pick_required(
             "migrations_dir",
@@ -325,7 +329,7 @@ fn build_downloader_config(
     );
 
     Ok(DownloaderConfig {
-        socks_proxy: cli.proxy.clone(),
+        socks_proxy: pick_first([Some(env.socks), Some(cli.proxy.clone())], || None),
         peer_name: peer_name.clone(),
         archive_dir,
         state_file: pick_first(
@@ -386,6 +390,7 @@ impl LogzzEnv {
             telegram_token: get_env_string("LOGZZ_TELEGRAM__TOKEN"),
             results_dir: get_env_string("LOGZZ_TELEGRAM__RESULTS_DIR"),
             max_results: get_env_parse("LOGZZ_TELEGRAM__MAX_RESULTS"),
+            socks: get_env_string("LOGZZ_TELEGRAM__SOCKS"),
         }
     }
 }
@@ -404,6 +409,7 @@ impl DownloaderEnv {
             rest_listen_addr: first_env_string(&["DOWNLOADER_REST_LISTEN_ADDR"]),
             api_id: first_env_parse(&["DOWNLOADER_API_ID", "TG_ID"]),
             api_hash: first_env_string(&["DOWNLOADER_API_HASH", "TG_HASH"]),
+            socks: get_env_string("DOWNLOADER_TELEGRAM__SOCKS"),
         }
     }
 }
