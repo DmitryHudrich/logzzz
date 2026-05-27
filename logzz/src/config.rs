@@ -251,7 +251,7 @@ fn build_app_config(file: FileConfig, cli: &Cli, env: LogzzEnv) -> Result<AppCon
     };
 
     Ok(AppConfig {
-        socks_proxy: pick_first([Some(env.socks), Some(cli.proxy.clone())], || None),
+        socks_proxy: env.socks.or(cli.proxy.clone()),
         clickhouse,
         migrations_dir: pick_required(
             "migrations_dir",
