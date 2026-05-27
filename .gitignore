@@ -2,6 +2,6 @@
 **/input
 /reports
 /test-files
-/.local/
+**/.local/
 /.env
 /config.yaml
