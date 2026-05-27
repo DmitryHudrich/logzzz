@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
         Some({
             let client = if let Some(proxy) = cfg.socks_proxy {
                 default_reqwest_settings()
-                    .proxy(reqwest::Proxy::all(&proxy)?)
+                    .proxy(reqwest::Proxy::all(dbg!(&proxy))?)
                     .build()?
             } else {
                 default_reqwest_settings().build()?
