@@ -329,7 +329,7 @@ fn build_downloader_config(
     );
 
     Ok(DownloaderConfig {
-        socks_proxy: pick_first([Some(env.socks), Some(cli.proxy.clone())], || None),
+        socks_proxy: env.socks.or(cli.proxy.clone()),
         peer_name: peer_name.clone(),
         archive_dir,
         state_file: pick_first(
