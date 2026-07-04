@@ -1,3 +1,5 @@
 **/target
 moralis_cache
 etherscan_cache
+.idea
+.pnpm-store

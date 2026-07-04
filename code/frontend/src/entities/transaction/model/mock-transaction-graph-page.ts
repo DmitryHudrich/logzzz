@@ -1,0 +1,66 @@
+import type { TransactionGraphPage } from '@/entities/transaction/model/transaction'
+
+export const mockTransactionGraphPage: TransactionGraphPage = {
+  total_nodes: 12,
+  total_edges: 14,
+  page: 0,
+  page_size: 100,
+  total_pages: 1,
+  has_next: false,
+  nodes: [
+    '0x1111111111111111111111111111111111111111',
+    '0x2222222222222222222222222222222222222222',
+    '0x3333333333333333333333333333333333333333',
+    '0x4444444444444444444444444444444444444444',
+    '0x5555555555555555555555555555555555555555',
+    '0x6666666666666666666666666666666666666666',
+    '0x7777777777777777777777777777777777777777',
+    '0x8888888888888888888888888888888888888888',
+    '0x9999999999999999999999999999999999999999',
+    '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    '0xcccccccccccccccccccccccccccccccccccccccc',
+  ],
+  edges: [
+    edge('tx-1', '0x1111111111111111111111111111111111111111', '0x5555555555555555555555555555555555555555', '4.2', 'ETH', 1),
+    edge('tx-2', '0x1111111111111111111111111111111111111111', '0x6666666666666666666666666666666666666666', '1.9', 'ETH', 1),
+    edge('tx-3', '0x2222222222222222222222222222222222222222', '0x1111111111111111111111111111111111111111', '2.3', 'ETH', 1),
+    edge('tx-4', '0x3333333333333333333333333333333333333333', '0x1111111111111111111111111111111111111111', '1.1', 'ETH', 1),
+    edge('tx-5', '0x4444444444444444444444444444444444444444', '0x1111111111111111111111111111111111111111', '0.8', 'ETH', 1),
+    edge('tx-6', '0x3333333333333333333333333333333333333333', '0x9999999999999999999999999999999999999999', '3500', 'USDT', 1, 'token'),
+    edge('tx-7', '0x4444444444444444444444444444444444444444', '0x9999999999999999999999999999999999999999', '1250', 'USDT', 1, 'token'),
+    edge('tx-8', '0x9999999999999999999999999999999999999999', '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '4700', 'USDT', 1, 'token'),
+    edge('tx-9', '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '4550', 'USDT', 1, 'token'),
+    edge('tx-10', '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '0x7777777777777777777777777777777777777777', '2.1', 'ETH', 1),
+    edge('tx-11', '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '0x8888888888888888888888888888888888888888', '1.6', 'ETH', 1),
+    edge('tx-12', '0x6666666666666666666666666666666666666666', '0xcccccccccccccccccccccccccccccccccccccccc', '0.4', 'ETH', 1),
+    edge('tx-13', '0xcccccccccccccccccccccccccccccccccccccccc', '0x8888888888888888888888888888888888888888', '0.4', 'ETH', 1),
+    edge('tx-14', '0x5555555555555555555555555555555555555555', '0x7777777777777777777777777777777777777777', '1.2', 'ETH', 1),
+  ],
+}
+
+function edge(
+  txHash: string,
+  from: string,
+  to: string,
+  formatted: string,
+  symbol: string,
+  chainId: number,
+  kind: TransactionGraphPage['edges'][number]['kind'] = 'native',
+): TransactionGraphPage['edges'][number] {
+  return {
+    tx_hash: txHash,
+    index: 0,
+    from,
+    to,
+    raw: String(Math.round(Number(formatted) * 1_000_000)),
+    formatted,
+    symbol,
+    decimals: symbol === 'USDT' ? 6 : 18,
+    block: 19_000_000,
+    ts: 1_719_878_400,
+    kind,
+    chain_id: chainId,
+    contract: kind === 'token' ? '0xdac17f958d2ee523a2206206994597c13d831ec7' : null,
+  }
+}

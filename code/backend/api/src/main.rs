@@ -14,6 +14,7 @@ use axum::{
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
@@ -755,6 +756,12 @@ async fn main() -> anyhow::Result<()> {
         )
         .merge(api)
         .with_state(state)
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         .layer(TraceLayer::new_for_http().on_failure(()).on_response(
             |resp: &axum::response::Response,
              latency: std::time::Duration,
