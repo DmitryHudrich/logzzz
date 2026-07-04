@@ -363,7 +363,7 @@ export const TransactionGraphPage = () => {
           </div>
         </div>
 
-        <aside className='hidden h-full w-1/5 min-w-[320px] border-l border-border bg-card/40 lg:flex lg:flex-col'>
+        <aside className='hidden h-full w-1/5 min-w-[320px] border-l border-border bg-background lg:flex lg:flex-col'>
           <ScrollArea className='h-full'>
             <div className='p-4'>{sidebar}</div>
           </ScrollArea>

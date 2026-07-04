@@ -12,6 +12,7 @@ const GRAPH_THEME = {
   edgeActive: '#52525c',
   label: '#52525c',
   labelActive: '#a1a1aa',
+  dimmedNode: '#27272a',
   groups: {
     wallet: '#7eb6ff',
     exchange: '#c4b0f5',
@@ -158,7 +159,16 @@ export const SigmaGraphAdapter = ({
           }
         }
 
-        return data
+        const neighborSet = getNeighborhood(sigmaGraph, activeNodeId)
+        if (neighborSet.has(node)) {
+          return data
+        }
+
+        return {
+          ...data,
+          color: GRAPH_THEME.dimmedNode,
+          label: '',
+        }
       },
       edgeReducer: (edge, data) => {
         const visibleIds = visibleEdgeIdsRef.current
@@ -263,6 +273,12 @@ function buildGraph(
   if (!hasSavedLayout) {
     applyLayout(graph, layout)
     compactGraphPositions(graph, 0.72)
+    if (layout === 'force') {
+      separateOverlappingNodes(graph, 5, 10)
+    } else {
+      // Keep concentric/flow shape and only lightly resolve direct collisions.
+      separateOverlappingNodes(graph, 0.1, 10)
+    }
   }
 
   graph.forEachNode((node, attributes) => {
@@ -478,4 +494,74 @@ function mapWeightToSize(weight: number) {
 
 function mapWeightToEdgeSize(weight: number) {
   return Math.max(0.35, Math.min(1.4, 0.3 + weight * 0.12))
+}
+
+function separateOverlappingNodes(graph: Graph<SigmaNodeAttrs, SigmaEdgeAttrs>, minDistance: number, iterations: number) {
+  const nodes = graph.nodes()
+  if (nodes.length < 2) {
+    return
+  }
+
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    let adjusted = false
+
+    for (let index = 0; index < nodes.length; index += 1) {
+      const first = nodes[index]!
+      let x1 = graph.getNodeAttribute(first, 'x')
+      let y1 = graph.getNodeAttribute(first, 'y')
+
+      for (let compareIndex = index + 1; compareIndex < nodes.length; compareIndex += 1) {
+        const second = nodes[compareIndex]!
+        let x2 = graph.getNodeAttribute(second, 'x')
+        let y2 = graph.getNodeAttribute(second, 'y')
+        const size1 = graph.getNodeAttribute(first, 'size')
+        const size2 = graph.getNodeAttribute(second, 'size')
+
+        const dx = x2 - x1
+        const dy = y2 - y1
+        const distance = Math.hypot(dx, dy)
+        const requiredDistance = Math.max(minDistance, (size1 + size2) * 0.018)
+
+        if (distance >= requiredDistance) {
+          continue
+        }
+
+        const safeDistance = distance < 1e-4 ? 1e-4 : distance
+        const overlap = (requiredDistance - safeDistance) * 0.5
+        const shiftX = (dx / safeDistance) * overlap
+        const shiftY = (dy / safeDistance) * overlap
+
+        if (distance < 1e-4) {
+          const angle = ((index + 1) * (compareIndex + 3) * 0.61) % (Math.PI * 2)
+          x1 -= Math.cos(angle) * overlap
+          y1 -= Math.sin(angle) * overlap
+          x2 += Math.cos(angle) * overlap
+          y2 += Math.sin(angle) * overlap
+        } else {
+          x1 -= shiftX
+          y1 -= shiftY
+          x2 += shiftX
+          y2 += shiftY
+        }
+
+        graph.setNodeAttribute(first, 'x', x1)
+        graph.setNodeAttribute(first, 'y', y1)
+        graph.setNodeAttribute(second, 'x', x2)
+        graph.setNodeAttribute(second, 'y', y2)
+        adjusted = true
+      }
+    }
+
+    if (!adjusted) {
+      break
+    }
+  }
+}
+
+function getNeighborhood(graph: Graph<SigmaNodeAttrs, SigmaEdgeAttrs>, nodeId: string) {
+  const neighbors = new Set<string>()
+  graph.forEachNeighbor(nodeId, (neighbor: string) => {
+    neighbors.add(neighbor)
+  })
+  return neighbors
 }

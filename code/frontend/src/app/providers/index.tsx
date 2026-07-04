@@ -9,7 +9,7 @@ export const AppProviders = ({ children }: PropsWithChildren) => {
     <QueryProvider>
       <TooltipProvider>
         {children}
-        <Toaster richColors closeButton position='top-right' />
+        <Toaster richColors position='bottom-left' />
       </TooltipProvider>
     </QueryProvider>
   )
