@@ -202,7 +202,7 @@ impl utoipa::Modify for ApiSecurity {
                        | Header | When required | Endpoints |\n\
                        |--------|---------------|-----------|\n\
                        | `X-Api-Key` | Set on the server (optional) | All `/graph`, `/score`, `/sanctions`, `/trace`, `/heuristics`, ... |\n\
-                       | `X-Admin-Api-Key` | Set on the server (optional) | Mutation endpoints: `POST /labels`, `POST /entities`, `POST /watchlist`, `POST /address/.../kind` |\n\
+                       | `X-Admin-Api-Key` | Set on the server (optional) | Mutation endpoints: `POST /labels`, `POST /labels/bulk`, `DELETE /labels/{addr}`, `POST /watchlist`, `POST /address/.../kind` |\n\
                        | `Authorization: Bearer <key>` | Alternative to `X-Api-Key` | Same as above |\n\n\
                        If the server has no API key configured, the corresponding headers \
                        are NOT required. The Scalar \"Authentication\" panel (top-right \
@@ -355,7 +355,6 @@ impl utoipa::Modify for ApiSecurity {
         get_address_kind, set_address_kind,
         edge_significance_endpoint,
         labels_set, labels_get, labels_delete, labels_bulk,
-        entity_create, entity_get, entity_add_addresses, entity_remove_address,
     ),
     components(schemas(
         GraphPage, EdgeDto,
@@ -374,7 +373,6 @@ impl utoipa::Modify for ApiSecurity {
         AddressKindRequest, AddressKindResponse,
         EdgeSignificanceResponse, EdgeScoreDto,
         LabelRequest, LabelResponse, LabelsBulkResponse,
-        EntityCreateRequest, EntityAddAddressesRequest,
     ))
 )]
 struct ApiDoc;
@@ -696,13 +694,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/labels", post(labels_set))
         .route("/labels/bulk", post(labels_bulk))
         .route("/labels/{addr}", get(labels_get).delete(labels_delete))
-        .route("/entities", post(entity_create))
-        .route("/entities/{id}", get(entity_get))
-        .route("/entities/{id}/addresses", post(entity_add_addresses))
-        .route(
-            "/entities/{id}/addresses/{addr}",
-            axum::routing::delete(entity_remove_address),
-        )
         .route("/watchlist", get(watchlist_list).post(watchlist_add).delete(watchlist_remove))
         .route("/alerts", get(list_alerts))
         .route("/address/{addr}/kind", post(set_address_kind))
@@ -2869,7 +2860,7 @@ pub async fn set_address_kind(
     Ok(Json(AddressKindResponse { address: addr.canonical(), kind: kind_str, service_name: name }))
 }
 
-// ── /labels + /entities ──────────────────────────────────────────────────────
+// ── /labels ─────────────────────────────────────────────────────────────────
 
 /// Request body for `POST /labels` (single) and each element of
 /// `POST /labels/bulk`. Attaches a category + label to an address, creating
@@ -2914,7 +2905,7 @@ pub struct LabelRequest {
     risk_score: Option<u8>,
 }
 
-/// Entity record returned by every `/labels` and `/entities` endpoint.
+/// Entity record returned by every `/labels` endpoint.
 ///
 /// One entity may carry many addresses (e.g. an exchange's hot-wallet set),
 /// hence `addresses` is plural. Reading a single address through `GET /labels/{addr}`
@@ -3155,6 +3146,14 @@ pub async fn labels_set(
     Ok(Json(entity_to_dto(&entity)))
 }
 
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct LabelAddrQuery {
+    /// Chain ID for parsing the path address. Defaults to 1 (Ethereum mainnet).
+    #[param(example = 1)]
+    chain_id: Option<u32>,
+}
+
 #[utoipa::path(
     get, path = "/labels/{addr}",
     description = "Look up the entity attached to an address (admin only).\n\n\
@@ -3168,15 +3167,18 @@ pub async fn labels_set(
                    or to expand a known address into the wider set of co-labelled siblings.\n\n\
                    ## Example\n\n\
                    ```bash\n\
-                   curl 'http://localhost:8080/labels/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045' \\\n\
+                   curl 'http://localhost:8080/labels/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045?chain_id=1' \\\n\
                      -H 'X-API-Version: 1' \\\n\
                      -H 'X-Admin-Api-Key: <admin-key>'\n\
                    ```\n\n\
                    ## Notes\n\n\
-                   Requires the `X-Admin-Api-Key` header. The path parameter is parsed against \
-                   Ethereum mainnet — for other chains, attach labels via the same address \
-                   format that the chain registry produces.",
-    params(("addr" = String, Path, description = "Address in hex (EVM) or canonical chain form.")),
+                   Requires the `X-Admin-Api-Key` header. `chain_id` defaults to 1 (Ethereum \
+                   mainnet); pass it explicitly for other chains so the path address is parsed \
+                   with the right encoding.",
+    params(
+        ("addr" = String, Path, description = "Address in hex (EVM) or canonical chain form."),
+        LabelAddrQuery,
+    ),
     responses(
         (status = 200,
          description = "The entity. `addresses` includes every address inside the same entity, \
@@ -3195,9 +3197,11 @@ pub async fn labels_set(
 pub async fn labels_get(
     State(state): State<Arc<AppState>>,
     Path(addr_param): Path<String>,
+    Query(q): Query<LabelAddrQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     use domain::ports::EntityRepository;
-    let addr = parse_address(&addr_param, ChainId::ETH)?;
+    let chain = ChainId::new(q.chain_id.unwrap_or(ChainId::ETH.value()));
+    let addr = parse_address(&addr_param, chain)?;
     let entity = state
         .entities()
         .find_by_address(&addr)
@@ -3221,13 +3225,17 @@ pub async fn labels_get(
                    one — there is no separate \"delete entity\" endpoint.\n\n\
                    ## Example\n\n\
                    ```bash\n\
-                   curl -X DELETE 'http://localhost:8080/labels/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045' \\\n\
+                   curl -X DELETE 'http://localhost:8080/labels/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045?chain_id=1' \\\n\
                      -H 'X-API-Version: 1' \\\n\
                      -H 'X-Admin-Api-Key: <admin-key>'\n\
                    ```\n\n\
                    ## Notes\n\n\
-                   Requires the `X-Admin-Api-Key` header.",
-    params(("addr" = String, Path, description = "Address in hex (EVM) or canonical chain form.")),
+                   Requires the `X-Admin-Api-Key` header. `chain_id` defaults to 1 (Ethereum \
+                   mainnet); pass it explicitly for other chains.",
+    params(
+        ("addr" = String, Path, description = "Address in hex (EVM) or canonical chain form."),
+        LabelAddrQuery,
+    ),
     responses(
         (status = 200,
          description = "Body: `{\"removed\": true, \"entity_id\": \"...\", \"remaining\": N}` \
@@ -3246,10 +3254,12 @@ pub async fn labels_get(
 pub async fn labels_delete(
     State(state): State<Arc<AppState>>,
     Path(addr_param): Path<String>,
+    Query(q): Query<LabelAddrQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     use domain::entity::Entity;
     use domain::ports::EntityRepository;
-    let addr = parse_address(&addr_param, ChainId::ETH)?;
+    let chain = ChainId::new(q.chain_id.unwrap_or(ChainId::ETH.value()));
+    let addr = parse_address(&addr_param, chain)?;
     let Some(entity) = state
         .entities()
         .find_by_address(&addr)
@@ -3312,169 +3322,6 @@ pub async fn labels_bulk(
         }
     }
     Ok(Json(LabelsBulkResponse { upserted, errors }))
-}
-
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub struct EntityCreateRequest {
-    /// Category. Same vocabulary as `LabelRequest.category`.
-    #[schema(example = "exchange")]
-    category: String,
-    #[schema(example = "OKX hot wallets")]
-    label_name: Option<String>,
-    label_url: Option<String>,
-    label_source: Option<String>,
-    sanction_list: Option<String>,
-    risk_score: Option<u8>,
-}
-
-#[utoipa::path(
-    post, path = "/entities",
-    request_body = EntityCreateRequest,
-    responses(
-        (status = 200, description = "Entity created", body = LabelResponse),
-        (status = 400, description = "Invalid category", body = ErrorResponse),
-    ),
-    tag = "Labels"
-)]
-pub async fn entity_create(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<EntityCreateRequest>,
-) -> Result<impl IntoResponse, ApiError> {
-    use domain::entity::{Entity, EntityLabel, RiskScore};
-    use domain::ports::EntityRepository;
-    let category = parse_category(&body.category, body.sanction_list.as_deref())?;
-    let risk = RiskScore::new(body.risk_score.unwrap_or_else(|| default_risk_for(&category)));
-    let mut entity = Entity::new(category, risk);
-    if let Some(name) = body.label_name {
-        entity.set_label(EntityLabel::new(
-            name,
-            body.label_url,
-            parse_source(body.label_source.as_deref()),
-        ));
-    }
-    state
-        .entities()
-        .save(&entity)
-        .await
-        .map_err(ApiError::Internal)?;
-    Ok(Json(entity_to_dto(&entity)))
-}
-
-#[utoipa::path(
-    get, path = "/entities/{id}",
-    params(("id" = String, Path, description = "Entity UUID")),
-    responses(
-        (status = 200, description = "Entity details", body = LabelResponse),
-        (status = 404, description = "Unknown entity_id", body = ErrorResponse),
-    ),
-    tag = "Labels"
-)]
-pub async fn entity_get(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<impl IntoResponse, ApiError> {
-    use domain::entity::EntityId;
-    use domain::ports::EntityRepository;
-    let uuid = uuid::Uuid::parse_str(&id)
-        .map_err(|e| ApiError::bad_request(format!("invalid uuid: {e}")))?;
-    let entity = state
-        .entities()
-        .find_by_id(&EntityId::from_uuid(uuid))
-        .await
-        .map_err(ApiError::Internal)?
-        .ok_or_else(|| ApiError::bad_request("unknown entity_id".to_string()))?;
-    Ok(Json(entity_to_dto(&entity)))
-}
-
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub struct EntityAddAddressesRequest {
-    chain_id: Option<u32>,
-    addresses: Vec<String>,
-}
-
-#[utoipa::path(
-    post, path = "/entities/{id}/addresses",
-    params(("id" = String, Path, description = "Entity UUID")),
-    request_body = EntityAddAddressesRequest,
-    responses(
-        (status = 200, description = "Updated entity", body = LabelResponse),
-        (status = 400, description = "Invalid address or unknown entity", body = ErrorResponse),
-    ),
-    tag = "Labels"
-)]
-pub async fn entity_add_addresses(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Json(body): Json<EntityAddAddressesRequest>,
-) -> Result<impl IntoResponse, ApiError> {
-    use domain::entity::EntityId;
-    use domain::ports::EntityRepository;
-    let uuid = uuid::Uuid::parse_str(&id)
-        .map_err(|e| ApiError::bad_request(format!("invalid uuid: {e}")))?;
-    let mut entity = state
-        .entities()
-        .find_by_id(&EntityId::from_uuid(uuid))
-        .await
-        .map_err(ApiError::Internal)?
-        .ok_or_else(|| ApiError::bad_request("unknown entity_id".to_string()))?;
-    let chain = ChainId::new(body.chain_id.unwrap_or(ChainId::ETH.value()));
-    for s in &body.addresses {
-        let a = parse_address(s, chain)?;
-        entity.add_address(a);
-    }
-    state
-        .entities()
-        .save(&entity)
-        .await
-        .map_err(ApiError::Internal)?;
-    Ok(Json(entity_to_dto(&entity)))
-}
-
-#[utoipa::path(
-    delete, path = "/entities/{id}/addresses/{addr}",
-    params(
-        ("id" = String, Path, description = "Entity UUID"),
-        ("addr" = String, Path, description = "Address (hex or canonical)"),
-    ),
-    responses(
-        (status = 200, description = "Address removed", body = LabelResponse),
-        (status = 400, description = "Invalid address or unknown entity", body = ErrorResponse),
-    ),
-    tag = "Labels"
-)]
-pub async fn entity_remove_address(
-    State(state): State<Arc<AppState>>,
-    Path((id, addr_param)): Path<(String, String)>,
-) -> Result<impl IntoResponse, ApiError> {
-    use domain::entity::{Entity, EntityId};
-    use domain::ports::EntityRepository;
-    let uuid = uuid::Uuid::parse_str(&id)
-        .map_err(|e| ApiError::bad_request(format!("invalid uuid: {e}")))?;
-    let entity = state
-        .entities()
-        .find_by_id(&EntityId::from_uuid(uuid))
-        .await
-        .map_err(ApiError::Internal)?
-        .ok_or_else(|| ApiError::bad_request("unknown entity_id".to_string()))?;
-    let addr = parse_address(&addr_param, ChainId::ETH)?;
-    let mut addresses = entity.addresses().clone();
-    addresses.remove(&addr);
-    let mut updated = Entity::from_parts(
-        entity.id().clone(),
-        entity.label().cloned(),
-        entity.category().clone(),
-        addresses,
-        entity.risk_score(),
-    );
-    if let Some(label) = entity.label() {
-        updated.set_label(label.clone());
-    }
-    state
-        .entities()
-        .save(&updated)
-        .await
-        .map_err(ApiError::Internal)?;
-    Ok(Json(entity_to_dto(&updated)))
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
