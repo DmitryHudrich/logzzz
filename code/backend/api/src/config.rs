@@ -617,6 +617,69 @@ impl ProxyConfig {
     }
 }
 
+/// CORS knobs applied to the outer axum router. Each list accepts either
+/// `["*"]` / `[]` (Any) or an explicit whitelist of exact values. Setting
+/// `allow_credentials: true` together with a wildcard in any of the three
+/// lists is a CORS spec violation and is rejected at startup.
+#[derive(Deserialize, Debug, Clone)]
+pub struct CorsConfig {
+    #[serde(default = "CorsConfig::default_star")]
+    allow_origins: Vec<String>,
+    #[serde(default = "CorsConfig::default_star")]
+    allow_methods: Vec<String>,
+    #[serde(default = "CorsConfig::default_star")]
+    allow_headers: Vec<String>,
+    #[serde(default)]
+    expose_headers: Vec<String>,
+    #[serde(default)]
+    allow_credentials: bool,
+    #[serde(default)]
+    max_age_secs: Option<u64>,
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self {
+            allow_origins: Self::default_star(),
+            allow_methods: Self::default_star(),
+            allow_headers: Self::default_star(),
+            expose_headers: Vec::new(),
+            allow_credentials: false,
+            max_age_secs: None,
+        }
+    }
+}
+
+impl CorsConfig {
+    fn default_star() -> Vec<String> {
+        vec!["*".into()]
+    }
+
+    pub fn allow_origins(&self) -> &[String] {
+        &self.allow_origins
+    }
+
+    pub fn allow_methods(&self) -> &[String] {
+        &self.allow_methods
+    }
+
+    pub fn allow_headers(&self) -> &[String] {
+        &self.allow_headers
+    }
+
+    pub fn expose_headers(&self) -> &[String] {
+        &self.expose_headers
+    }
+
+    pub fn allow_credentials(&self) -> bool {
+        self.allow_credentials
+    }
+
+    pub fn max_age(&self) -> Option<Duration> {
+        self.max_age_secs.map(Duration::from_secs)
+    }
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct TelemetryConfig {
     #[serde(default)]
@@ -1128,6 +1191,8 @@ pub struct AppConfig {
     #[serde(default)]
     telemetry: TelemetryConfig,
     #[serde(default)]
+    cors: CorsConfig,
+    #[serde(default)]
     risk_cache: RiskCacheConfigFile,
     #[serde(default)]
     heuristics: HeuristicsConfigFile,
@@ -1249,6 +1314,10 @@ impl AppConfig {
 
     pub fn telemetry(&self) -> &TelemetryConfig {
         &self.telemetry
+    }
+
+    pub fn cors(&self) -> &CorsConfig {
+        &self.cors
     }
 
     pub fn risk_cache(&self) -> &RiskCacheConfigFile {

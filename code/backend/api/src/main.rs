@@ -19,7 +19,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 
-use crate::config::{AppConfig, Cli, EthSourceKind, TelemetryConfig};
+use crate::config::{AppConfig, Cli, CorsConfig, EthSourceKind, TelemetryConfig};
 use domain::chain::{ChainId, ChainRegistry};
 use domain::entity::SanctionList;
 use domain::error::DomainError;
@@ -756,12 +756,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .merge(api)
         .with_state(state)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+        .layer(build_cors_layer(cfg.cors())?)
         .layer(TraceLayer::new_for_http().on_failure(()).on_response(
             |resp: &axum::response::Response,
              latency: std::time::Duration,
@@ -851,6 +846,84 @@ fn init_tracer(
 
 fn parse_address(s: &str, chain: ChainId) -> Result<Address, ApiError> {
     Address::parse(chain, s).map_err(|e| ApiError::bad_request(e.to_string()))
+}
+
+fn build_cors_layer(cfg: &CorsConfig) -> anyhow::Result<CorsLayer> {
+    use anyhow::Context;
+    use axum::http::{HeaderName, HeaderValue, Method};
+
+    let is_star = |v: &[String]| v.is_empty() || v.iter().any(|s| s == "*");
+    let creds = cfg.allow_credentials();
+
+    let mut layer = CorsLayer::new();
+
+    if is_star(cfg.allow_origins()) {
+        anyhow::ensure!(
+            !creds,
+            "cors: allow_credentials=true is incompatible with allow_origins=[\"*\"]"
+        );
+        layer = layer.allow_origin(Any);
+    } else {
+        let origins = cfg
+            .allow_origins()
+            .iter()
+            .map(|s| HeaderValue::from_str(s))
+            .collect::<Result<Vec<_>, _>>()
+            .context("cors.allow_origins: invalid origin")?;
+        layer = layer.allow_origin(origins);
+    }
+
+    if is_star(cfg.allow_methods()) {
+        anyhow::ensure!(
+            !creds,
+            "cors: allow_credentials=true is incompatible with allow_methods=[\"*\"]"
+        );
+        layer = layer.allow_methods(Any);
+    } else {
+        let methods = cfg
+            .allow_methods()
+            .iter()
+            .map(|s| Method::from_bytes(s.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .context("cors.allow_methods: invalid method")?;
+        layer = layer.allow_methods(methods);
+    }
+
+    if is_star(cfg.allow_headers()) {
+        anyhow::ensure!(
+            !creds,
+            "cors: allow_credentials=true is incompatible with allow_headers=[\"*\"]"
+        );
+        layer = layer.allow_headers(Any);
+    } else {
+        let headers = cfg
+            .allow_headers()
+            .iter()
+            .map(|s| HeaderName::from_bytes(s.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .context("cors.allow_headers: invalid header name")?;
+        layer = layer.allow_headers(headers);
+    }
+
+    if !cfg.expose_headers().is_empty() {
+        let expose = cfg
+            .expose_headers()
+            .iter()
+            .map(|s| HeaderName::from_bytes(s.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .context("cors.expose_headers: invalid header name")?;
+        layer = layer.expose_headers(expose);
+    }
+
+    if creds {
+        layer = layer.allow_credentials(true);
+    }
+
+    if let Some(age) = cfg.max_age() {
+        layer = layer.max_age(age);
+    }
+
+    Ok(layer)
 }
 
 fn format_amount(raw: U256, decimals: u8) -> String {

@@ -124,6 +124,17 @@ telemetry:
   otlp_endpoint: "http://127.0.0.1:4317"
   service_name: "paytraces-api"
 
+cors:
+  allow_origins: ["*"]
+  allow_methods: ["*"]
+  allow_headers: ["*"]
+
+  expose_headers: []
+
+  allow_credentials: false
+
+  max_age_secs: null
+
 risk_cache:
   score_ttl_secs: 300        # /score result cache TTL
   score_max_entries: 10000
