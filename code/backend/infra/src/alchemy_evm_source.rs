@@ -65,7 +65,7 @@ fn cu_for_method(method: &str) -> f64 {
 }
 
 #[derive(Debug, Clone)]
-pub struct AlchemyEthConfig {
+pub struct AlchemyEvmConfig {
     api_keys: Vec<String>,
     base_url: String,
     key_cooldown: Duration,
@@ -86,7 +86,7 @@ pub struct AlchemyEthConfig {
     http_max_attempts: u8,
 }
 
-impl AlchemyEthConfig {
+impl AlchemyEvmConfig {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         api_keys: Vec<String>,
@@ -146,6 +146,15 @@ impl AlchemyEthConfig {
     pub fn has_keys(&self) -> bool {
         !self.api_keys.is_empty()
     }
+
+    /// Per-chain Alchemy endpoint override. Alchemy uses chain-specific
+    /// hostnames (eth-mainnet / polygon-mainnet / base-mainnet / ...) that
+    /// share the same API-key pool. Multi-chain deployments MUST override
+    /// this when reusing one `alchemy:` section across chains.
+    pub fn with_base_url(mut self, url: String) -> Self {
+        self.base_url = url;
+        self
+    }
 }
 
 /// Structured cache key for the two paginated upstream endpoints
@@ -196,7 +205,8 @@ impl PageKey {
 type PageValue = Arc<Vec<serde_json::Value>>;
 
 #[derive(Clone)]
-pub struct AlchemyEthSource {
+pub struct AlchemyEvmSource {
+    chain: ChainId,
     key_pool: KeyPool,
     base_url: String,
     enable_transfers: bool,
@@ -221,11 +231,11 @@ pub struct AlchemyEthSource {
     batch_eth_get_code_disabled: Arc<AtomicBool>,
 }
 
-impl AlchemyEthSource {
-    pub fn new(client: reqwest::Client, cfg: AlchemyEthConfig) -> Self {
+impl AlchemyEvmSource {
+    pub fn new(chain: ChainId, client: reqwest::Client, cfg: AlchemyEvmConfig) -> Self {
         assert!(
             cfg.has_keys(),
-            "AlchemyEthSource: at least one api key required — config validation must guard this"
+            "AlchemyEvmSource: at least one api key required — config validation must guard this"
         );
         let key_pool = KeyPool::new(cfg.api_keys.clone(), cfg.key_cooldown);
 
@@ -281,10 +291,12 @@ impl AlchemyEthSource {
             requests_per_second = cfg.requests_per_second,
             requests_per_second_burst = cfg.requests_per_second_burst,
             http_max_attempts = cfg.http_max_attempts,
-            "Alchemy ETH source initialized"
+            chain_id = chain.value(),
+            "Alchemy EVM source initialized"
         );
 
         Self {
+            chain,
             key_pool,
             base_url: cfg.base_url,
             enable_transfers: cfg.enable_transfers,
@@ -1045,14 +1057,14 @@ impl AlchemyEthSource {
 }
 
 #[async_trait]
-impl ChainSource for AlchemyEthSource {
+impl ChainSource for AlchemyEvmSource {
     fn chain_id(&self) -> ChainId {
-        ChainId::ETH
+        self.chain
     }
 
     async fn latest_block(&self) -> DomainResult<BlockRef> {
         let h = self.eth_block_number().await?;
-        Ok(BlockRef::new(ChainId::ETH, h, [0u8; 32]))
+        Ok(BlockRef::new(self.chain, h, [0u8; 32]))
     }
 
     async fn fetch_block(&self, height: u64) -> DomainResult<NormalizedBlock> {
@@ -1091,7 +1103,7 @@ impl ChainSource for AlchemyEthSource {
             .single()
             .ok_or_else(|| DomainError::InsufficientData(format!("alchemy fetch_block: bad timestamp {ts_secs}")))?;
 
-        let block_ref = BlockRef::new(ChainId::ETH, height, block_hash);
+        let block_ref = BlockRef::new(self.chain, height, block_hash);
         let mut block_ts: HashMap<u64, chrono::DateTime<chrono::Utc>> = HashMap::new();
         block_ts.insert(height, timestamp);
         let mut by_tx: HashMap<[u8; 32], u32> = HashMap::new();
@@ -1102,7 +1114,7 @@ impl ChainSource for AlchemyEthSource {
         // is reserved for inner traces and ERC-20 events in the same tx.
         if let Some(txs) = block_v.get("transactions").and_then(|v| v.as_array()) {
             for raw in txs {
-                match map_native_tx_to_transfer(raw, height, block_hash, timestamp, &mut by_tx) {
+                match map_native_tx_to_transfer(self.chain, raw, height, block_hash, timestamp, &mut by_tx) {
                     Ok(Some(t)) => transfers.push(t),
                     Ok(None) => {}
                     Err(e) => tracing::warn!(error = %e, "alchemy fetch_block: skip malformed tx"),
@@ -1113,7 +1125,7 @@ impl ChainSource for AlchemyEthSource {
         // ERC-20 Transfer events in the same block. Each log claims the
         // next free idx within its tx so we never collide on the PK.
         for raw in log_rows {
-            match map_log_to_transfer(&raw, &block_ts, &mut by_tx) {
+            match map_log_to_transfer(self.chain, &raw, &block_ts, &mut by_tx) {
                 Ok(Some(t)) => transfers.push(t),
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = %e, "alchemy fetch_block: skip malformed log"),
@@ -1135,9 +1147,10 @@ impl ChainSource for AlchemyEthSource {
                 "alchemy: transfers disabled (set alchemy.enable_transfers=true to enable)".into(),
             ));
         }
-        if addr.chain() != ChainId::ETH {
+        if addr.chain() != self.chain {
             return Err(DomainError::InsufficientData(format!(
-                "alchemy source called with non-eth chain: {}",
+                "alchemy source (chain={}) called with foreign address chain: {}",
+                self.chain,
                 addr.chain()
             )));
         }
@@ -1227,14 +1240,14 @@ impl ChainSource for AlchemyEthSource {
         let mut out: Vec<Transfer> = Vec::with_capacity(traces.len() + logs.len());
 
         for (_, raw) in traces {
-            match map_trace_to_transfer(&raw, &block_ts, &mut by_tx) {
+            match map_trace_to_transfer(self.chain, &raw, &block_ts, &mut by_tx) {
                 Ok(Some(t)) => out.push(t),
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = %e, "alchemy: skip malformed trace"),
             }
         }
         for (_, raw) in logs {
-            match map_log_to_transfer(&raw, &block_ts, &mut by_tx) {
+            match map_log_to_transfer(self.chain, &raw, &block_ts, &mut by_tx) {
                 Ok(Some(t)) => out.push(t),
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = %e, "alchemy: skip malformed log"),
@@ -1257,7 +1270,7 @@ impl ChainSource for AlchemyEthSource {
     }
 
     async fn is_contract(&self, addr: &Address) -> DomainResult<Option<bool>> {
-        if addr.chain() != ChainId::ETH {
+        if addr.chain() != self.chain {
             return Ok(None);
         }
         let bytes = addr.bytes().to_vec();
@@ -1299,7 +1312,7 @@ impl ChainSource for AlchemyEthSource {
         let mut needs_fetch_idx: Vec<usize> = Vec::with_capacity(addrs.len());
         let mut needs_fetch_addr: Vec<String> = Vec::with_capacity(addrs.len());
         for (i, addr) in addrs.iter().enumerate() {
-            if addr.chain() != ChainId::ETH {
+            if addr.chain() != self.chain {
                 // Stay consistent with the single-shot path: foreign chains
                 // get Ok(None) (unknown), not an error.
                 continue;
@@ -1349,7 +1362,7 @@ impl ChainSource for AlchemyEthSource {
     }
 }
 
-impl AlchemyEthSource {
+impl AlchemyEvmSource {
     /// Parallel single-shot fallback when the batch path can't be trusted.
     /// `out` carries the cache hits we already resolved; we only fan out
     /// for `needs_fetch_idx` entries so we don't re-fetch cached ones.
@@ -1381,7 +1394,7 @@ impl AlchemyEthSource {
     }
 }
 
-impl AlchemyEthSource {
+impl AlchemyEvmSource {
     async fn block_timestamp(&self, height: u64) -> DomainResult<chrono::DateTime<chrono::Utc>> {
         let res = self
             .jsonrpc_call(
@@ -1427,6 +1440,7 @@ fn build_transfer_topics(
 /// * `traceAddress == []` AND outer `type == "call"` — the outermost trace
 ///   IS the outer tx's value transfer (idx=0); inner traces shift by +1.
 fn map_trace_to_transfer(
+    chain: ChainId,
     raw: &serde_json::Value,
     block_ts: &HashMap<u64, chrono::DateTime<chrono::Utc>>,
     by_tx: &mut HashMap<[u8; 32], u32>,
@@ -1529,8 +1543,8 @@ fn map_trace_to_transfer(
         .context("trace: block hash")?
         .unwrap_or(tx_hash);
 
-    let from = parse_eth_address(from_s).context("trace: from")?;
-    let to = parse_eth_address(to_s).context("trace: to")?;
+    let from = parse_eth_address(chain, from_s).context("trace: from")?;
+    let to = parse_eth_address(chain, to_s).context("trace: to")?;
 
     let timestamp = match block_ts.get(&block_num) {
         Some(t) => *t,
@@ -1557,14 +1571,14 @@ fn map_trace_to_transfer(
     };
 
     Ok(Some(Transfer::new(
-        TransferId::new(ChainId::ETH, tx_hash, idx),
-        ChainId::ETH,
-        TxRef::new(ChainId::ETH, tx_hash),
+        TransferId::new(chain, tx_hash, idx),
+        chain,
+        TxRef::new(chain, tx_hash),
         from,
         to,
-        AssetId::native(ChainId::ETH),
+        AssetId::native(chain),
         Amount::new(raw_val, 18),
-        BlockRef::new(ChainId::ETH, block_num, block_hash),
+        BlockRef::new(chain, block_num, block_hash),
         timestamp,
         TransferKind::Native,
         Finality::Confirmed,
@@ -1579,6 +1593,7 @@ fn map_trace_to_transfer(
 ///   trace_filter pathway picks them up via the create trace).
 /// * Value == 0 — skip (pure contract call).
 fn map_native_tx_to_transfer(
+    chain: ChainId,
     raw: &serde_json::Value,
     block_number: u64,
     block_hash: [u8; 32],
@@ -1611,22 +1626,22 @@ fn map_native_tx_to_transfer(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("tx: missing hash"))?;
     let tx_hash = parse_hash32(tx_hash_s).context("tx: hash")?;
-    let from = parse_eth_address(from_s).context("tx: from")?;
-    let to = parse_eth_address(to_s).context("tx: to")?;
+    let from = parse_eth_address(chain, from_s).context("tx: from")?;
+    let to = parse_eth_address(chain, to_s).context("tx: to")?;
 
     // Reserve idx=0 for the outer native transfer — subsequent log/internal
     // entries for the same tx start at idx=1.
     by_tx.entry(tx_hash).or_insert(0);
 
     Ok(Some(Transfer::new(
-        TransferId::new(ChainId::ETH, tx_hash, 0),
-        ChainId::ETH,
-        TxRef::new(ChainId::ETH, tx_hash),
+        TransferId::new(chain, tx_hash, 0),
+        chain,
+        TxRef::new(chain, tx_hash),
         from,
         to,
-        AssetId::native(ChainId::ETH),
+        AssetId::native(chain),
         Amount::new(raw_val, 18),
-        BlockRef::new(ChainId::ETH, block_number, block_hash),
+        BlockRef::new(chain, block_number, block_hash),
         timestamp,
         TransferKind::Native,
         Finality::Confirmed,
@@ -1636,6 +1651,7 @@ fn map_native_tx_to_transfer(
 /// Map an Alchemy `eth_getLogs` row (ERC-20 Transfer) into a Transfer.
 /// Filters ERC-721 by requiring exactly 3 topics (event sig + from + to).
 fn map_log_to_transfer(
+    chain: ChainId,
     raw: &serde_json::Value,
     block_ts: &HashMap<u64, chrono::DateTime<chrono::Utc>>,
     by_tx: &mut HashMap<[u8; 32], u32>,
@@ -1652,9 +1668,9 @@ fn map_log_to_transfer(
     }
     let from_topic = topics[1].as_str().ok_or_else(|| anyhow!("log: topic1 not str"))?;
     let to_topic = topics[2].as_str().ok_or_else(|| anyhow!("log: topic2 not str"))?;
-    let from = parse_eth_address(&unpad_address(from_topic))
+    let from = parse_eth_address(chain, &unpad_address(from_topic))
         .context("log: from address")?;
-    let to = parse_eth_address(&unpad_address(to_topic))
+    let to = parse_eth_address(chain, &unpad_address(to_topic))
         .context("log: to address")?;
 
     let data = raw.get("data").and_then(|v| v.as_str()).unwrap_or("0x");
@@ -1667,7 +1683,7 @@ fn map_log_to_transfer(
         .get("address")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("log: missing address"))?;
-    let contract = parse_eth_address(contract_s).context("log: contract")?;
+    let contract = parse_eth_address(chain, contract_s).context("log: contract")?;
 
     let tx_hash_s = raw
         .get("transactionHash")
@@ -1697,17 +1713,17 @@ fn map_log_to_transfer(
     *position += 1;
 
     Ok(Some(Transfer::new(
-        TransferId::new(ChainId::ETH, tx_hash, idx),
-        ChainId::ETH,
-        TxRef::new(ChainId::ETH, tx_hash),
+        TransferId::new(chain, tx_hash, idx),
+        chain,
+        TxRef::new(chain, tx_hash),
         from,
         to,
-        AssetId::contract(ChainId::ETH, contract.bytes().to_vec()),
+        AssetId::contract(chain, contract.bytes().to_vec()),
         // Decimals are unknown from the Transfer event alone; default to 18
         // and let downstream asset enrichment correct it. Same compromise
         // that the moralis/bigquery sources make on missing-decimal events.
         Amount::new(raw_val, 18),
-        BlockRef::new(ChainId::ETH, block_num, block_hash),
+        BlockRef::new(chain, block_num, block_hash),
         timestamp,
         TransferKind::Token {
             contract,
@@ -1758,14 +1774,14 @@ fn parse_hash32(s: &str) -> anyhow::Result<[u8; 32]> {
         .map_err(|v: Vec<u8>| anyhow!("expected 32 bytes, got {}", v.len()))
 }
 
-fn parse_eth_address(s: &str) -> anyhow::Result<Address> {
+fn parse_eth_address(chain: ChainId, s: &str) -> anyhow::Result<Address> {
     use anyhow::Context;
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).context("hex decode eth address")?;
     if bytes.len() != 20 {
         anyhow::bail!("eth address expected 20 bytes, got {}", bytes.len());
     }
-    Ok(Address::new(ChainId::ETH, bytes))
+    Ok(Address::new(chain, bytes))
 }
 
 /// Strip the 12-byte left-pad from a topic-encoded address.

@@ -10,11 +10,11 @@ use domain::error::{DomainError, DomainResult};
 use domain::ports::EntityRepository;
 use domain::primitives::Address;
 
-pub mod alchemy_eth_source;
-pub mod bigquery_eth_source;
+pub mod alchemy_evm_source;
+pub mod bigquery_evm_source;
 pub mod chain_sources;
-pub mod eth_routed_source;
-pub mod etherscan_eth_source;
+pub mod etherscan_evm_source;
+pub mod evm_routed_source;
 pub mod fetch_wallet_api;
 pub mod forensics_repo;
 pub mod in_memory;
@@ -26,13 +26,13 @@ pub mod rate_limiter;
 pub mod tron_source;
 mod transfer_repo;
 
-pub use alchemy_eth_source::{AlchemyEthConfig, AlchemyEthSource};
-pub use bigquery_eth_source::{BigQueryEthConfig, BigQueryEthSource};
+pub use alchemy_evm_source::{AlchemyEvmConfig, AlchemyEvmSource};
+pub use bigquery_evm_source::{BigQueryEvmConfig, BigQueryEvmSource};
 pub use chain_sources::{ChainSources, ChainSourcesBuilder};
-pub use eth_routed_source::{
-    Capability, RoutedChains, RoutedEthSource, RoutedEthSourceBuilder,
+pub use etherscan_evm_source::{EtherscanEvmConfig, EtherscanEvmSource};
+pub use evm_routed_source::{
+    Capability, RoutedChains, RoutedEvmSource, RoutedEvmSourceBuilder,
 };
-pub use etherscan_eth_source::{EtherscanEthConfig, EtherscanEthSource};
 pub use forensics_repo::{PostgresAddressKinds, PostgresAlerts, PostgresWatchlist};
 pub use in_memory::{
     InMemoryAddressKinds, InMemoryAlerts, InMemoryWatchlist, StaticLabelProvider,

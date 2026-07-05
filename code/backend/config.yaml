@@ -12,6 +12,41 @@ log:
     - "domain=debug"
     - "usecase=debug"
 
+# Multi-chain wiring. Each entry declares one blockchain and which upstream
+# (or router) serves it. Provider-specific pools of API keys and throttles live
+# in the top-level `alchemy:` / `etherscan:` / `moralis:` / `trongrid:` /
+# `bigquery:` sections and are shared across all chains that use them.
+#
+# When `chains: [...]` is non-empty, it replaces the legacy `ethereum:` +
+# `trongrid.enabled` path entirely. Legacy path below is preserved as a
+# fallback for existing deployments.
+chains:
+  - id: 1
+    name: ethereum
+    source:
+      kind: routed
+      transfers:    [etherscan]
+      is_contract:  [alchemy]
+      latest_block: [etherscan, alchemy]
+      fetch_block:  [alchemy]
+      source_cooldown_secs: 10
+  # Add another EVM chain by declaring one entry:
+  # - id: 137
+  #   name: polygon
+  #   source:
+  #     kind: alchemy
+  #     base_url: "https://polygon-mainnet.g.alchemy.com/v2"
+  # - id: 56
+  #   name: bsc
+  #   source:
+  #     kind: alchemy
+  #     base_url: "https://bnb-mainnet.g.alchemy.com/v2"
+  # - id: 195
+  #   name: tron
+  #   source:
+  #     kind: trongrid
+
+# Legacy path — used only when `chains: []` is empty. Deprecated.
 ethereum:
   source: routed
 
@@ -190,3 +225,10 @@ score:
 
 labels:
   bootstrap_file: ""         # absolute/relative path to JSON array of LabelRequest objects loaded at startup
+
+api:
+  # Chain id used when a request omits chain_id (e.g. GET /score?address=...).
+  # Historically hard-coded to 1 (ETH). For a Polygon-primary deployment set 137,
+  # for BSC 56, for Tron 195 — clients that pass chain_id explicitly are unaffected.
+  # Each fallback logs at WARN so operators can spot ETH-assuming clients.
+  default_chain_id: 1

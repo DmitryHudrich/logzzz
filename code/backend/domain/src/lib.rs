@@ -2,6 +2,8 @@ pub mod chain;
 
 pub mod primitives;
 
+pub mod address_codec;
+
 pub mod asset;
 
 pub mod transfer;

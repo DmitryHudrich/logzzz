@@ -150,11 +150,11 @@ impl MoralisConfig {
         &self.cache
     }
 
-    /// Build the domain-level `MoralisEthConfig` so main.rs doesn't need
+    /// Build the domain-level `MoralisEvmConfig` so main.rs doesn't need
     /// to thread every knob through the constructor.
-    pub fn into_domain(self) -> infra::fetch_wallet_api::MoralisEthConfig {
+    pub fn into_domain(self) -> infra::fetch_wallet_api::MoralisEvmConfig {
         let keys = self.resolved_keys();
-        infra::fetch_wallet_api::MoralisEthConfig::new(
+        infra::fetch_wallet_api::MoralisEvmConfig::new(
             keys,
             self.base_url,
             self.cache.into_domain(),
@@ -784,8 +784,8 @@ impl BigQueryConfig {
         &self.credentials_path
     }
 
-    pub fn into_domain(self) -> infra::BigQueryEthConfig {
-        infra::BigQueryEthConfig::new(
+    pub fn into_domain(self) -> infra::BigQueryEvmConfig {
+        infra::BigQueryEvmConfig::new(
             self.project_id,
             std::path::PathBuf::from(self.credentials_path),
             self.transactions_table,
@@ -925,9 +925,9 @@ impl EtherscanConfigFile {
         !self.resolved_keys().is_empty()
     }
 
-    pub fn into_domain(self) -> infra::EtherscanEthConfig {
+    pub fn into_domain(self) -> infra::EtherscanEvmConfig {
         let keys = self.resolved_keys();
-        infra::EtherscanEthConfig::new(
+        infra::EtherscanEvmConfig::new(
             keys,
             Some(self.base_url),
             self.page_size,
@@ -1006,7 +1006,7 @@ pub struct AlchemyConfigFile {
 
 impl AlchemyConfigFile {
     fn default_base_url() -> String {
-        infra::alchemy_eth_source::DEFAULT_BASE_URL.into()
+        infra::alchemy_evm_source::DEFAULT_BASE_URL.into()
     }
     fn default_key_cooldown_secs() -> u64 {
         5
@@ -1079,9 +1079,9 @@ impl AlchemyConfigFile {
         !self.resolved_keys().is_empty()
     }
 
-    pub fn into_domain(self) -> infra::AlchemyEthConfig {
+    pub fn into_domain(self) -> infra::AlchemyEvmConfig {
         let keys = self.resolved_keys();
-        infra::AlchemyEthConfig::new(
+        infra::AlchemyEvmConfig::new(
             keys,
             Some(self.base_url),
             Some(Duration::from_secs(self.key_cooldown_secs)),
@@ -1169,6 +1169,106 @@ impl EtherscanFileCacheConfig {
     }
 }
 
+/// Per-chain source spec inside the `chains: [...]` list. Each chain declares
+/// which upstream (or router) serves it; provider-specific pools of API keys
+/// and throttles stay in the top-level `alchemy:`/`etherscan:`/`moralis:`/
+/// `trongrid:` sections. Overrides (`base_url`, table names) are folded on top
+/// of those defaults at wire-up time.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ChainSourceSpec {
+    Etherscan {
+        #[serde(default)]
+        base_url: Option<String>,
+    },
+    Alchemy {
+        /// Chain-specific Alchemy endpoint. When absent, uses `alchemy.base_url`
+        /// from the top-level section (which is ETH-mainnet by default).
+        /// For non-ETH deployments you MUST override — Alchemy's chain-specific
+        /// hosts (polygon-mainnet.g.alchemy.com, base-mainnet.g.alchemy.com, ...)
+        /// share the pool of API keys but differ in URL.
+        #[serde(default)]
+        base_url: Option<String>,
+    },
+    Moralis,
+    Bigquery {
+        #[serde(default)]
+        transactions_table: Option<String>,
+        #[serde(default)]
+        token_transfers_table: Option<String>,
+    },
+    Trongrid {
+        #[serde(default)]
+        base_url: Option<String>,
+    },
+    Routed {
+        #[serde(default)]
+        transfers: Vec<String>,
+        #[serde(default)]
+        is_contract: Vec<String>,
+        #[serde(default)]
+        latest_block: Vec<String>,
+        #[serde(default)]
+        fetch_block: Vec<String>,
+        #[serde(default)]
+        source_cooldown_secs: Option<u64>,
+    },
+}
+
+impl ChainSourceSpec {
+    /// Names of leaf providers this spec references. For `routed`, that's the
+    /// union of every capability chain; for a single-source spec, it's the
+    /// one provider it names. Used by main.rs to build only what's needed.
+    pub fn referenced_providers(&self) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        match self {
+            ChainSourceSpec::Etherscan { .. } => {
+                out.insert("etherscan".to_string());
+            }
+            ChainSourceSpec::Alchemy { .. } => {
+                out.insert("alchemy".to_string());
+            }
+            ChainSourceSpec::Moralis => {
+                out.insert("moralis".to_string());
+            }
+            ChainSourceSpec::Bigquery { .. } => {
+                out.insert("bigquery".to_string());
+            }
+            ChainSourceSpec::Trongrid { .. } => {
+                out.insert("trongrid".to_string());
+            }
+            ChainSourceSpec::Routed {
+                transfers,
+                is_contract,
+                latest_block,
+                fetch_block,
+                ..
+            } => {
+                for v in [transfers, is_contract, latest_block, fetch_block] {
+                    for n in v {
+                        out.insert(n.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct ChainConfigFile {
+    /// Numeric chain id — must match `domain::chain::ChainId` values (1 = ETH
+    /// mainnet, 137 = Polygon, 56 = BSC, 195 = Tron, etc). Duplicate ids are
+    /// rejected at startup.
+    pub id: u32,
+    /// Optional human-readable name; if omitted, `ChainRegistry::default_registry`
+    /// value (or `"chain:<id>"`) is used in logs. This is purely cosmetic.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Which upstream (or router) serves this chain.
+    pub source: ChainSourceSpec,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     server: ServerConfig,
@@ -1185,6 +1285,10 @@ pub struct AppConfig {
     routed: Option<RoutedConfigFile>,
     #[serde(default)]
     ethereum: EthereumConfig,
+    /// New: per-chain wire-up. When non-empty, replaces the legacy
+    /// `ethereum:` / `trongrid.enabled:` path entirely.
+    #[serde(default)]
+    chains: Vec<ChainConfigFile>,
     database: DatabaseConfig,
     proxy: ProxyConfig,
     log: LogConfig,
@@ -1202,6 +1306,8 @@ pub struct AppConfig {
     labels: LabelsConfigFile,
     #[serde(default)]
     ingestion: IngestionConfigFile,
+    #[serde(default)]
+    api: ApiConfig,
 }
 
 /// Tunables for adaptive concurrency in the ingestion pipeline. The gate
@@ -1275,6 +1381,36 @@ impl TransfersConcurrencyConfig {
     }
 }
 
+/// Cross-cutting API knobs that don't fit into more specific sections.
+///
+/// `default_chain_id` — the chain used when a request omits `chain_id`. Historically
+/// hard-coded to 1 (ETH); making it a config value is the first step to running
+/// this server against a non-Ethereum primary chain (Polygon, BSC, ...). Requests
+/// that still want ETH just pass `chain_id=1` explicitly.
+#[derive(Deserialize, Debug, Clone)]
+pub struct ApiConfig {
+    #[serde(default = "ApiConfig::default_chain_id_default")]
+    default_chain_id: u32,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            default_chain_id: Self::default_chain_id_default(),
+        }
+    }
+}
+
+impl ApiConfig {
+    fn default_chain_id_default() -> u32 {
+        1
+    }
+
+    pub fn default_chain_id(&self) -> u32 {
+        self.default_chain_id
+    }
+}
+
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct LabelsConfigFile {
     #[serde(default)]
@@ -1338,6 +1474,14 @@ impl AppConfig {
 
     pub fn ingestion(&self) -> &IngestionConfigFile {
         &self.ingestion
+    }
+
+    pub fn api(&self) -> &ApiConfig {
+        &self.api
+    }
+
+    pub fn chains(&self) -> &[ChainConfigFile] {
+        &self.chains
     }
 
     pub fn ethereum(&self) -> &EthereumConfig {
