@@ -142,6 +142,8 @@ async fn main() -> anyhow::Result<()> {
     let alerts_for_ingest: Arc<dyn domain::ports::AlertSink> = Arc::clone(&alerts) as _;
     let kinds_for_ingest: Arc<dyn domain::ports::AddressKindRepository> =
         Arc::clone(&address_kinds) as _;
+    let kinds_for_risk: Arc<dyn domain::ports::AddressKindRepository> =
+        Arc::clone(&address_kinds) as _;
 
     let transfers_concurrency = {
         let c = &cfg.ingestion().transfers_concurrency;
@@ -177,7 +179,8 @@ async fn main() -> anyhow::Result<()> {
             cfg.risk_cache().clone().into_domain(),
             cfg.heuristics().clone().into_domain(),
             cfg.score().clone().into_domain(),
-        ),
+        )
+        .with_address_kinds(kinds_for_risk),
         Arc::clone(&entities_repo),
         chain_registry,
         JobRepository::new(pool.clone()),

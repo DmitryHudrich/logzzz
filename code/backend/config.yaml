@@ -198,9 +198,13 @@ ingestion:
 heuristics:
   min_fanout: 5              # unique receivers in window to trigger fan-out
   min_fanin: 5               # unique senders in window to trigger fan-in
+  max_fanout: 200            # above this, treat as shared infra (exchange/router), never merge through it
+  max_fanin: 200             # same, for senders / deposit-reuse / smurf convergence
   fan_window_secs: 86400     # sliding-window length for fan-in/out (24h)
   smurf_window_secs: 86400   # max delay between distributor->intermediary->cash-out hops
   smurf_max_depth: 2         # BFS hops downstream from each intermediary (1 = direct cash-out)
+  deposit_reuse_min_incoming: 3   # min incoming transfers to deposit_addr before considering it
+  deposit_reuse_min_senders: 2    # min distinct senders required to fire deposit-address-reuse
 
 score:
   # Strategy for collapsing N RiskSignals into one overall score:
@@ -224,7 +228,7 @@ score:
   trace_min_amount_ratio_percent: 5  # min % of inflow that must reach a sink for it to count
 
 labels:
-  bootstrap_file: ""         # absolute/relative path to JSON array of LabelRequest objects loaded at startup
+  bootstrap_file: "api/examples/wallet_labels.jsonc"         # absolute/relative path to JSON array of LabelRequest objects loaded at startup
 
 api:
   # Chain id used when a request omits chain_id (e.g. GET /score?address=...).

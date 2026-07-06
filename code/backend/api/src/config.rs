@@ -494,6 +494,10 @@ pub struct HeuristicsConfigFile {
     min_fanout: usize,
     #[serde(default = "HeuristicsConfigFile::default_min_fanin")]
     min_fanin: usize,
+    #[serde(default = "HeuristicsConfigFile::default_max_fanout")]
+    max_fanout: usize,
+    #[serde(default = "HeuristicsConfigFile::default_max_fanin")]
+    max_fanin: usize,
     #[serde(default = "HeuristicsConfigFile::default_fan_window_secs")]
     fan_window_secs: u64,
     #[serde(default = "HeuristicsConfigFile::default_smurf_window_secs")]
@@ -516,6 +520,10 @@ pub struct HeuristicsConfigFile {
     dwell_max_secs: u64,
     #[serde(default = "HeuristicsConfigFile::default_dwell_min_pairs")]
     dwell_min_pairs: usize,
+    #[serde(default = "HeuristicsConfigFile::default_deposit_reuse_min_incoming")]
+    deposit_reuse_min_incoming: usize,
+    #[serde(default = "HeuristicsConfigFile::default_deposit_reuse_min_senders")]
+    deposit_reuse_min_senders: usize,
 }
 
 impl Default for HeuristicsConfigFile {
@@ -523,6 +531,8 @@ impl Default for HeuristicsConfigFile {
         Self {
             min_fanout: Self::default_min_fanout(),
             min_fanin: Self::default_min_fanin(),
+            max_fanout: Self::default_max_fanout(),
+            max_fanin: Self::default_max_fanin(),
             fan_window_secs: Self::default_fan_window_secs(),
             smurf_window_secs: Self::default_smurf_window_secs(),
             smurf_max_depth: Self::default_smurf_max_depth(),
@@ -534,6 +544,8 @@ impl Default for HeuristicsConfigFile {
             fixed_amount_bucket_usd: Self::default_fixed_amount_bucket_usd(),
             dwell_max_secs: Self::default_dwell_max_secs(),
             dwell_min_pairs: Self::default_dwell_min_pairs(),
+            deposit_reuse_min_incoming: Self::default_deposit_reuse_min_incoming(),
+            deposit_reuse_min_senders: Self::default_deposit_reuse_min_senders(),
         }
     }
 }
@@ -544,6 +556,12 @@ impl HeuristicsConfigFile {
     }
     fn default_min_fanin() -> usize {
         5
+    }
+    fn default_max_fanout() -> usize {
+        200
+    }
+    fn default_max_fanin() -> usize {
+        200
     }
     fn default_fan_window_secs() -> u64 {
         86_400
@@ -575,11 +593,19 @@ impl HeuristicsConfigFile {
     fn default_dwell_min_pairs() -> usize {
         5
     }
+    fn default_deposit_reuse_min_incoming() -> usize {
+        3
+    }
+    fn default_deposit_reuse_min_senders() -> usize {
+        2
+    }
 
     pub fn into_domain(self) -> usecase::risk::HeuristicsConfig {
         usecase::risk::HeuristicsConfig {
             min_fanout: self.min_fanout,
             min_fanin: self.min_fanin,
+            max_fanout: self.max_fanout,
+            max_fanin: self.max_fanin,
             fan_window: Duration::from_secs(self.fan_window_secs),
             smurf_window: Duration::from_secs(self.smurf_window_secs),
             smurf_max_depth: self.smurf_max_depth,
@@ -591,6 +617,8 @@ impl HeuristicsConfigFile {
             fixed_amount_bucket_usd: self.fixed_amount_bucket_usd,
             dwell_max_secs: self.dwell_max_secs,
             dwell_min_pairs: self.dwell_min_pairs,
+            deposit_reuse_min_incoming: self.deposit_reuse_min_incoming,
+            deposit_reuse_min_senders: self.deposit_reuse_min_senders,
         }
     }
 }

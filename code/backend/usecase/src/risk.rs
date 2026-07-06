@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use domain::entity::{
-    ClusterEvidence, ClusteringHeuristic, Entity, EntityCategory, RiskScore, SanctionList,
+    AddressKind, ClusterEvidence, ClusteringHeuristic, EntityCategory, RiskScore, SanctionList,
 };
 use domain::error::DomainResult;
-use domain::ports::{EntityRepository, RiskPort, TransferRepository};
+use domain::ports::{AddressKindRepository, EntityRepository, RiskPort, TransferRepository};
 use domain::primitives::{Address, Amount, Confidence, Ratio};
 use domain::risk::{RiskEvidence, RiskReport, RiskSignal, RiskSignalKind, SanctionsCheckResult};
 use domain::trace::{
@@ -76,6 +76,14 @@ impl TraceCacheKey {
 pub struct HeuristicsConfig {
     pub min_fanout: usize,
     pub min_fanin: usize,
+    /// upper bound on unique counterparties for fan-out/fan-in/smurfing/
+    /// deposit-reuse to still be treated as a personal-wallet pattern.
+    /// Above this, the address behaves like shared infrastructure (an
+    /// exchange hot wallet, a router, a popular contract) rather than one
+    /// owner, so the detector must not fire — merging through it would
+    /// transitively cluster large numbers of unrelated addresses together.
+    pub max_fanout: usize,
+    pub max_fanin: usize,
     pub fan_window: Duration,
     pub smurf_window: Duration,
     pub smurf_max_depth: u32,
@@ -98,6 +106,11 @@ pub struct HeuristicsConfig {
     pub dwell_max_secs: u64,
     /// dwell-time — minimum number of matched in/out pairs to fire.
     pub dwell_min_pairs: usize,
+    /// deposit-reuse — minimum incoming transfers to `deposit_addr` before
+    /// even considering it (below this there's nothing to "reuse").
+    pub deposit_reuse_min_incoming: usize,
+    /// deposit-reuse — minimum distinct senders required to fire.
+    pub deposit_reuse_min_senders: usize,
 }
 
 impl Default for HeuristicsConfig {
@@ -105,6 +118,8 @@ impl Default for HeuristicsConfig {
         Self {
             min_fanout: 5,
             min_fanin: 5,
+            max_fanout: 200,
+            max_fanin: 200,
             fan_window: Duration::from_secs(86_400),
             smurf_window: Duration::from_secs(86_400),
             smurf_max_depth: 2,
@@ -116,6 +131,8 @@ impl Default for HeuristicsConfig {
             fixed_amount_bucket_usd: 100.0,
             dwell_max_secs: 600,
             dwell_min_pairs: 5,
+            deposit_reuse_min_incoming: 3,
+            deposit_reuse_min_senders: 2,
         }
     }
 }
@@ -260,6 +277,7 @@ fn signal_key(s: &RiskSignal) -> SignalKey {
 pub struct RiskService<R, E> {
     transfers: R,
     entities: E,
+    address_kinds: Option<Arc<dyn AddressKindRepository>>,
     score_cache: Cache<Address, RiskReport>,
     sanctions_cache: Cache<Address, SanctionsCheckResult>,
     trace_cache: Cache<TraceCacheKey, TraceResult>,
@@ -299,12 +317,18 @@ impl<R, E> RiskService<R, E> {
         Self {
             transfers,
             entities,
+            address_kinds: None,
             score_cache,
             sanctions_cache,
             trace_cache,
             heuristics,
             score_cfg,
         }
+    }
+
+    pub fn with_address_kinds(mut self, kinds: Arc<dyn AddressKindRepository>) -> Self {
+        self.address_kinds = Some(kinds);
+        self
     }
 }
 
@@ -321,6 +345,39 @@ where
             results.push(res?);
         }
         Ok(results)
+    }
+
+    /// Is `addr` already labelled as an entity category that legitimately
+    /// serves large numbers of unrelated owners (exchange, bridge, DeFi
+    /// router, mining pool)? Sanctioned/scam/darknet/gambling entities are
+    /// deliberately excluded — those satellite addresses are exactly what
+    /// clustering is meant to surface, not infrastructure noise to filter.
+    async fn is_shared_infrastructure(&self, addr: &Address) -> DomainResult<bool> {
+        let entity = self.entities.find_by_address(addr).await?;
+        Ok(matches!(
+            entity.map(|e| e.category().clone()),
+            Some(
+                EntityCategory::Exchange
+                    | EntityCategory::Bridge
+                    | EntityCategory::DefiProtocol
+                    | EntityCategory::Mixer
+                    | EntityCategory::Mining
+            )
+        ))
+    }
+
+    /// Is `addr` a smart contract? Used to keep clustering heuristics that
+    /// assume a *personal* address (e.g. deposit-reuse) from firing on
+    /// contracts (DEX routers, token contracts, pool addresses), which
+    /// routinely receive from many unrelated senders by design. Returns
+    /// `false` (rather than erroring) when no address-kind repository is
+    /// wired up, or when the kind hasn't been classified yet — the caller's
+    /// other checks (fan-in caps, entity labels) still apply.
+    async fn is_contract(&self, addr: &Address) -> DomainResult<bool> {
+        let Some(kinds) = &self.address_kinds else {
+            return Ok(false);
+        };
+        Ok(matches!(kinds.kind(addr).await?, AddressKind::Contract))
     }
 }
 
@@ -748,9 +805,20 @@ where
         &self,
         deposit_addr: &Address,
     ) -> DomainResult<Option<ClusterEvidence>> {
+        // A real per-customer deposit address is rarely visited by more than
+        // a handful of unrelated senders. An address already labelled as
+        // shared infrastructure (exchange, bridge, DeFi router, miner), or
+        // that is itself a contract (DEX router, token, pool — all routinely
+        // receive from countless unrelated owners by design), is the
+        // opposite case: "shared senders" proves nothing about common
+        // ownership there and must not become a merge point.
+        if self.is_shared_infrastructure(deposit_addr).await? || self.is_contract(deposit_addr).await? {
+            return Ok(None);
+        }
+
         let incoming = self.transfers.find_incoming(deposit_addr, None).await?;
 
-        if incoming.len() < 3 {
+        if incoming.len() < self.heuristics.deposit_reuse_min_incoming {
             return Ok(None);
         }
 
@@ -761,7 +829,12 @@ where
             v
         };
 
-        if senders.len() < 2 {
+        // Below the configured floor, nothing to reuse. Above max_fanin the
+        // address itself behaves like a hub by plain sender count, even
+        // without a label — same reasoning as the fan-in/fan-out cap.
+        if senders.len() < self.heuristics.deposit_reuse_min_senders
+            || senders.len() > self.heuristics.max_fanin
+        {
             return Ok(None);
         }
 
@@ -810,7 +883,7 @@ where
         // Pick the asset with the strongest peeling signal — the smallest
         // retained ratio that's still under the 5% threshold. Assets that
         // either don't appear in outgoing, or have out > in, are skipped.
-        let mut best: Option<Ratio> = None;
+        let mut best: Option<(Ratio, AssetId)> = None;
         for (asset, in_total) in &in_by_asset {
             let Some(out_total) = out_by_asset.get(asset) else {
                 continue;
@@ -824,17 +897,24 @@ where
                 continue;
             }
             best = match best {
-                None => Some(retained_ratio),
-                Some(curr) if retained_ratio < curr => Some(retained_ratio),
+                None => Some((retained_ratio, asset.clone())),
+                Some((curr, _)) if retained_ratio < curr => Some((retained_ratio, asset.clone())),
                 other => other,
             };
         }
 
-        let Some(retained_ratio) = best else {
+        let Some((retained_ratio, best_asset)) = best else {
             return Ok(None);
         };
 
-        let chain_addrs: Vec<Address> = outgoing.into_iter().map(|t| t.to().clone()).collect();
+        // Only the counterparties of the peeling asset's own outgoing legs
+        // belong in the evidence — an address that received a different,
+        // non-peeling asset from `addr` didn't participate in this pattern.
+        let chain_addrs: Vec<Address> = outgoing
+            .into_iter()
+            .filter(|t| t.asset() == &best_asset)
+            .map(|t| t.to().clone())
+            .collect();
 
         Ok(Some(ClusterEvidence::new(
             chain_addrs,
@@ -1040,6 +1120,14 @@ where
         let mut uf = UnionFind::new();
         uf.insert(addr.clone());
 
+        // Defense in depth: even with per-detector fanin/fanout caps, a
+        // labelled hub can slip into evidence produced by a different
+        // heuristic (e.g. temporal_burst, fixed_amount_clustering). Never
+        // let a known shared-infrastructure address act as a merge point —
+        // drop it from the group instead of unioning through it. Memoized
+        // locally since the same counterparty can recur across heuristics.
+        let mut hub_cache: HashMap<Address, bool> = HashMap::new();
+
         for ev in [
             self.detect_fan_out(addr).await?,
             self.detect_fan_in(addr).await?,
@@ -1053,8 +1141,24 @@ where
         .into_iter()
         .flatten()
         {
-            let mut group: Vec<Address> = ev.addresses().to_vec();
+            let mut group: Vec<Address> = Vec::with_capacity(ev.addresses().len() + 1);
+            for a in ev.addresses() {
+                let is_hub = match hub_cache.get(a) {
+                    Some(v) => *v,
+                    None => {
+                        let v = self.is_shared_infrastructure(a).await?;
+                        hub_cache.insert(a.clone(), v);
+                        v
+                    }
+                };
+                if !is_hub {
+                    group.push(a.clone());
+                }
+            }
             group.push(addr.clone());
+            if group.len() < 2 {
+                continue;
+            }
             uf.union_all(&group);
         }
 
@@ -1068,6 +1172,7 @@ where
             &outgoing,
             |t| t.to().clone(),
             cfg.min_fanout,
+            cfg.max_fanout,
             cfg.fan_window,
             ClusteringHeuristic::FanOut,
             |n, window_secs| {
@@ -1083,6 +1188,7 @@ where
             &incoming,
             |t| t.from().clone(),
             cfg.min_fanin,
+            cfg.max_fanin,
             cfg.fan_window,
             ClusteringHeuristic::FanIn,
             |n, window_secs| {
@@ -1106,7 +1212,11 @@ where
             v
         };
 
-        if receivers.len() < cfg.min_fanout {
+        // Below min_fanout there's no smurf-style spread; above max_fanout
+        // `addr` is already behaving like shared infrastructure (payroll,
+        // airdrop, exchange payout) rather than a distributor structuring
+        // funds, so don't try to trace convergence from it.
+        if receivers.len() < cfg.min_fanout || receivers.len() > cfg.max_fanout {
             return Ok(None);
         }
 
@@ -1134,9 +1244,13 @@ where
             }
         }
 
+        // Same reasoning on the cash-out side: a `y` that absorbs more than
+        // max_fanin intermediaries is a popular sink (exchange deposit,
+        // bridge) rather than a genuine convergence point for this specific
+        // distributor, so it's excluded rather than treated as evidence.
         let mut hits: Vec<(Address, HashSet<Address>)> = downstream
             .into_iter()
-            .filter(|(_, v)| v.len() >= cfg.min_fanin)
+            .filter(|(_, v)| v.len() >= cfg.min_fanin && v.len() <= cfg.max_fanin)
             .collect();
         if hits.is_empty() {
             return Ok(None);
@@ -1169,17 +1283,6 @@ where
         )))
     }
 
-    async fn save_cluster(
-        &self,
-        evidence: ClusterEvidence,
-        category: EntityCategory,
-    ) -> DomainResult<()> {
-        let mut entity = Entity::new(category, RiskScore::MEDIUM);
-        for addr in evidence.addresses() {
-            entity.add_address(addr.clone());
-        }
-        self.entities.save(&entity).await
-    }
 }
 
 impl<R, E> RiskService<R, E>
@@ -1313,6 +1416,7 @@ fn burst_window_evidence<F, N>(
     transfers: &[Transfer],
     counterparty: F,
     min_unique: usize,
+    max_unique: usize,
     window: Duration,
     heuristic: ClusteringHeuristic,
     note: N,
@@ -1354,6 +1458,14 @@ where
     }
 
     let addresses = best?;
+    // Above max_unique the address is behaving like shared infrastructure
+    // (an exchange hot wallet, a router, a popular contract) rather than a
+    // single owner's burst. Reject the whole match rather than truncating
+    // it to the cap — a truncated subset would still wrongly union a chunk
+    // of unrelated counterparties together.
+    if addresses.len() > max_unique {
+        return None;
+    }
     let n = addresses.len();
     Some(ClusterEvidence::new(
         addresses,
@@ -1957,6 +2069,305 @@ mod heuristics_tests {
 
         let svc = service(repo, HeuristicsConfig::default());
         assert!(svc.detect_peeling_chain(&middle).await.unwrap().is_none());
+    }
+
+    struct LabelledEntities {
+        addr: Address,
+        category: EntityCategory,
+    }
+
+    #[async_trait]
+    impl EntityRepository for LabelledEntities {
+        async fn find_by_id(&self, _id: &EntityId) -> DomainResult<Option<Entity>> {
+            Ok(None)
+        }
+        async fn find_by_address(&self, addr: &Address) -> DomainResult<Option<Entity>> {
+            if addr == &self.addr {
+                let mut e = Entity::new(self.category.clone(), RiskScore::MEDIUM);
+                e.add_address(addr.clone());
+                Ok(Some(e))
+            } else {
+                Ok(None)
+            }
+        }
+        async fn find_by_label(
+            &self,
+            _category: &EntityCategory,
+            _label_name: &str,
+        ) -> DomainResult<Option<Entity>> {
+            Ok(None)
+        }
+        async fn save(&self, _entity: &Entity) -> DomainResult<()> {
+            Ok(())
+        }
+        async fn list_sanctioned(&self) -> DomainResult<Vec<Entity>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn service_with_entities<E: EntityRepository>(
+        transfers: MockTransfers,
+        entities: E,
+        heuristics: HeuristicsConfig,
+    ) -> RiskService<MockTransfers, E> {
+        RiskService::new(transfers, entities, RiskCacheConfig::default(), heuristics)
+    }
+
+    /// A burst that peaks above max_fanout must be rejected outright, not
+    /// truncated to the cap — a truncated subset would still wrongly union
+    /// a chunk of unrelated recipients together.
+    #[tokio::test]
+    async fn fan_out_silent_above_max_fanout() {
+        let repo = MockTransfers::default();
+        let src = addr(1);
+        let t0 = 1_000_000;
+        for i in 0..10u32 {
+            repo.push(make_transfer(&src, &addr(10 + i as u8), t0 + i as i64, i));
+        }
+        let svc = service(
+            repo,
+            HeuristicsConfig {
+                min_fanout: 5,
+                max_fanout: 8,
+                fan_window: Duration::from_secs(60),
+                ..HeuristicsConfig::default()
+            },
+        );
+        assert!(svc.detect_fan_out(&src).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn deposit_reuse_triggers_within_bounds() {
+        let repo = MockTransfers::default();
+        let deposit = addr(1);
+        for i in 0..3u32 {
+            repo.push(make_transfer(&addr(10 + i as u8), &deposit, 1_000_000 + i as i64, i));
+        }
+        let svc = service(repo, HeuristicsConfig::default());
+        let ev = svc
+            .deposit_reuse_cluster(&deposit)
+            .await
+            .unwrap()
+            .expect("evidence");
+        assert_eq!(ev.addresses().len(), 3);
+        assert!(matches!(
+            ev.heuristic(),
+            ClusteringHeuristic::DepositAddressReuse
+        ));
+    }
+
+    /// A deposit address reused by many more senders than max_fanin looks
+    /// like a public hot wallet, not a personal deposit address — must stay
+    /// silent even without any entity label.
+    #[tokio::test]
+    async fn deposit_reuse_silent_above_max_fanin() {
+        let repo = MockTransfers::default();
+        let deposit = addr(1);
+        for i in 0..20u32 {
+            repo.push(make_transfer(&addr(10 + i as u8), &deposit, 1_000_000 + i as i64, i));
+        }
+        let svc = service(
+            repo,
+            HeuristicsConfig {
+                max_fanin: 10,
+                ..HeuristicsConfig::default()
+            },
+        );
+        assert!(svc.deposit_reuse_cluster(&deposit).await.unwrap().is_none());
+    }
+
+    /// An address already labelled as shared infrastructure (exchange,
+    /// bridge, DeFi router, mixer, mining pool) must never be treated as a
+    /// deposit-reuse merge point, regardless of sender count.
+    #[tokio::test]
+    async fn deposit_reuse_silent_when_labelled_exchange() {
+        let repo = MockTransfers::default();
+        let deposit = addr(1);
+        for i in 0..3u32 {
+            repo.push(make_transfer(&addr(10 + i as u8), &deposit, 1_000_000 + i as i64, i));
+        }
+        let svc = service_with_entities(
+            repo,
+            LabelledEntities {
+                addr: deposit.clone(),
+                category: EntityCategory::Exchange,
+            },
+            HeuristicsConfig::default(),
+        );
+        assert!(svc.deposit_reuse_cluster(&deposit).await.unwrap().is_none());
+    }
+
+    struct FixedKind {
+        addr: Address,
+        kind: AddressKind,
+    }
+
+    #[async_trait]
+    impl AddressKindRepository for FixedKind {
+        async fn kind(&self, addr: &Address) -> DomainResult<AddressKind> {
+            if addr == &self.addr {
+                Ok(self.kind.clone())
+            } else {
+                Ok(AddressKind::Unknown)
+            }
+        }
+        async fn set_kind(&self, _addr: &Address, _kind: AddressKind) -> DomainResult<()> {
+            Ok(())
+        }
+    }
+
+    /// A deposit address already classified as a contract (DEX router,
+    /// token, pool) must never fire deposit-reuse — contracts routinely
+    /// receive from many unrelated senders by design, unlike a personal
+    /// deposit address.
+    #[tokio::test]
+    async fn deposit_reuse_silent_when_address_is_a_contract() {
+        let repo = MockTransfers::default();
+        let deposit = addr(1);
+        for i in 0..3u32 {
+            repo.push(make_transfer(&addr(10 + i as u8), &deposit, 1_000_000 + i as i64, i));
+        }
+        let svc = service_with_entities(repo, NopEntities, HeuristicsConfig::default())
+            .with_address_kinds(Arc::new(FixedKind {
+                addr: deposit.clone(),
+                kind: AddressKind::Contract,
+            }));
+        assert!(svc.deposit_reuse_cluster(&deposit).await.unwrap().is_none());
+    }
+
+    /// The lower thresholds (min incoming / min distinct senders) must come
+    /// from `heuristics:` config, not be hardcoded — raising either bar
+    /// above the fixture's actual counts must silence the detector.
+    #[tokio::test]
+    async fn deposit_reuse_respects_configured_min_senders() {
+        let repo = MockTransfers::default();
+        let deposit = addr(1);
+        // 3 incoming transfers (meets default min_incoming) but only 2
+        // distinct senders.
+        for i in 0..3u32 {
+            repo.push(make_transfer(
+                &addr(10 + (i % 2) as u8),
+                &deposit,
+                1_000_000 + i as i64,
+                i,
+            ));
+        }
+        let svc = service(
+            repo,
+            HeuristicsConfig {
+                deposit_reuse_min_senders: 3,
+                ..HeuristicsConfig::default()
+            },
+        );
+        assert!(svc.deposit_reuse_cluster(&deposit).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn deposit_reuse_respects_configured_min_incoming() {
+        let repo = MockTransfers::default();
+        let deposit = addr(1);
+        for i in 0..3u32 {
+            repo.push(make_transfer(&addr(10 + i as u8), &deposit, 1_000_000 + i as i64, i));
+        }
+        let svc = service(
+            repo,
+            HeuristicsConfig {
+                deposit_reuse_min_incoming: 5,
+                ..HeuristicsConfig::default()
+            },
+        );
+        assert!(svc.deposit_reuse_cluster(&deposit).await.unwrap().is_none());
+    }
+
+    /// cluster_address must not union through a labelled hub even when the
+    /// evidence surfacing it comes from a different heuristic (here: plain
+    /// fan-in, which has no entity-awareness of its own) — the exclusion is
+    /// applied generically at the merge step.
+    #[tokio::test]
+    async fn cluster_address_drops_labelled_hub_from_any_heuristic_evidence() {
+        let repo = MockTransfers::default();
+        let victim = addr(1);
+        let hub = addr(99);
+        let t0 = 1_000_000;
+        // 4 ordinary receivers + the labelled hub as the 5th distinct
+        // recipient — enough to trigger plain fan-out, which has no
+        // entity-awareness of its own.
+        for i in 0..4u32 {
+            repo.push(make_transfer(&victim, &addr(10 + i as u8), t0 + i as i64, i));
+        }
+        repo.push(make_transfer(&victim, &hub, t0 + 4, 4));
+
+        let svc = service_with_entities(
+            repo,
+            LabelledEntities {
+                addr: hub.clone(),
+                category: EntityCategory::Exchange,
+            },
+            HeuristicsConfig {
+                min_fanout: 5,
+                fan_window: Duration::from_secs(60),
+                ..HeuristicsConfig::default()
+            },
+        );
+        let components = svc.cluster_address(&victim).await.unwrap();
+
+        assert!(
+            components.iter().all(|c| !c.contains(&hub)),
+            "labelled hub must not appear in any cluster component: {components:?}"
+        );
+        let victim_component = components
+            .iter()
+            .find(|c| c.contains(&victim))
+            .expect("victim must be in some component");
+        assert!(
+            (0..4u32).all(|i| victim_component.contains(&addr(10 + i as u8))),
+            "the 4 ordinary receivers must still be merged with victim: {victim_component:?}"
+        );
+    }
+
+    /// Evidence must only carry counterparties from the peeling asset's own
+    /// outgoing legs — a counterparty that received a different, non-peeling
+    /// asset didn't participate in the pattern and must not leak in.
+    #[tokio::test]
+    async fn peeling_chain_evidence_excludes_non_peeling_asset_counterparties() {
+        let chain = ChainId::ETH;
+        let usdc = AssetId::contract(chain, vec![0xa0u8; 20]);
+        let eth = AssetId::native(chain);
+
+        let middle = addr(1);
+        let src = addr(2);
+        let eth_dst = addr(3);
+        let usdc_dst = addr(4);
+
+        let repo = MockTransfers::default();
+        // ETH leg peels (~1% retained).
+        repo.push(make_transfer_with_asset(
+            &src, &middle, eth.clone(), 1_000_000_000_000_000_000, 18, 1, 1,
+        ));
+        repo.push(make_transfer_with_asset(
+            &middle, &eth_dst, eth.clone(), 990_000_000_000_000_000, 18, 2, 2,
+        ));
+        // USDC leg does NOT peel (50% retained) and goes to a different
+        // counterparty than the ETH leg.
+        repo.push(make_transfer_with_asset(
+            &src, &middle, usdc.clone(), 1_000_000_000, 6, 3, 3,
+        ));
+        repo.push(make_transfer_with_asset(
+            &middle, &usdc_dst, usdc.clone(), 500_000_000, 6, 4, 4,
+        ));
+
+        let svc = service(repo, HeuristicsConfig::default());
+        let ev = svc
+            .detect_peeling_chain(&middle)
+            .await
+            .unwrap()
+            .expect("ETH leg should fire peeling");
+        assert!(ev.addresses().contains(&eth_dst));
+        assert!(
+            !ev.addresses().contains(&usdc_dst),
+            "USDC counterparty must not leak into ETH-only peeling evidence: {:?}",
+            ev.addresses()
+        );
     }
 }
 
