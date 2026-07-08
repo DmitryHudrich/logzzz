@@ -3,6 +3,7 @@ import { Copy, Loader2, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
+import { ENTITY_CATEGORIES, SANCTION_LISTS, type AddressLabel, type EntityCategory, type SanctionList } from '@/entities/label'
 import type { TransactionEdge, TransactionNodeDetails } from '@/entities/transaction'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/shared/ui/accordion'
 import { Badge } from '@/shared/ui/badge'
@@ -31,6 +32,13 @@ type TransactionNodeDetailsDrawerProps = {
   defaultMaxDepth?: number
   defaultMaxNodes?: number
   isAddingOrigin?: boolean
+  label?: AddressLabel | null
+  onSaveLabel?: (payload: {
+    category: EntityCategory | string
+    labelName: string
+    sanctionList: SanctionList | string | null
+  }) => Promise<void> | void
+  isSavingLabel?: boolean
 }
 
 const groupLabels: Record<string, string> = {
@@ -48,6 +56,9 @@ export const TransactionNodeDetailsDrawer = ({
   defaultMaxDepth = 2,
   defaultMaxNodes = 500,
   isAddingOrigin = false,
+  label = null,
+  onSaveLabel,
+  isSavingLabel = false,
 }: TransactionNodeDetailsDrawerProps) => {
   useEffect(() => {
     if (!open) {
@@ -90,6 +101,9 @@ export const TransactionNodeDetailsDrawer = ({
             defaultMaxDepth={defaultMaxDepth}
             defaultMaxNodes={defaultMaxNodes}
             isAddingOrigin={isAddingOrigin}
+            label={label}
+            onSaveLabel={onSaveLabel}
+            isSavingLabel={isSavingLabel}
           />
         ) : (
           <div className='space-y-1.5 p-4'>
@@ -125,6 +139,9 @@ function PanelDetailsContent({
   defaultMaxDepth,
   defaultMaxNodes,
   isAddingOrigin,
+  label,
+  onSaveLabel,
+  isSavingLabel,
 }: {
   details: TransactionNodeDetails
   onAddOriginFromNode?: (params: {
@@ -135,11 +152,21 @@ function PanelDetailsContent({
   defaultMaxDepth: number
   defaultMaxNodes: number
   isAddingOrigin: boolean
+  label: AddressLabel | null
+  onSaveLabel?: (payload: {
+    category: EntityCategory | string
+    labelName: string
+    sanctionList: SanctionList | string | null
+  }) => Promise<void> | void
+  isSavingLabel: boolean
 }) {
-  const [activeTab, setActiveTab] = useState<'transactions' | 'analytics'>('transactions')
+  const [activeTab, setActiveTab] = useState<'transactions' | 'analytics' | 'label'>('transactions')
   const [extendMaxDepth, setExtendMaxDepth] = useState(String(defaultMaxDepth))
   const [extendMaxNodes, setExtendMaxNodes] = useState(String(defaultMaxNodes))
   const [originMode, setOriginMode] = useState<'fetch' | 'draw'>('fetch')
+  const [labelNameInput, setLabelNameInput] = useState('')
+  const [labelCategoryInput, setLabelCategoryInput] = useState<EntityCategory>('exchange')
+  const [sanctionListInput, setSanctionListInput] = useState<SanctionList>('ofac')
 
   useEffect(() => {
     setActiveTab('transactions')
@@ -149,10 +176,14 @@ function PanelDetailsContent({
     setExtendMaxDepth(String(defaultMaxDepth))
     setExtendMaxNodes(String(defaultMaxNodes))
     setOriginMode('fetch')
+    setLabelNameInput('')
+    setLabelCategoryInput('exchange')
+    setSanctionListInput('ofac')
   }, [details.address, defaultMaxDepth, defaultMaxNodes])
 
   const tokenVolumes = useMemo(() => buildTokenVolumes(details.incoming, details.outgoing), [details.incoming, details.outgoing])
   const timelinePoints = useMemo(() => buildTimelinePoints(details.incoming, details.outgoing), [details.incoming, details.outgoing])
+  const primaryLabel = label ? formatAddressLabel(label) : null
 
   return (
     <div className='flex min-h-0 flex-1 flex-col'>
@@ -160,7 +191,7 @@ function PanelDetailsContent({
         <div className='flex items-start justify-between gap-3'>
           <div className='space-y-2'>
             <div className='flex items-center gap-2'>
-              <h2 className='font-mono text-base font-semibold'>{details.node.label}</h2>
+              <h2 className='font-mono text-base font-semibold'>{primaryLabel ?? details.node.label}</h2>
               {details.node.group ? (
                 <Badge variant='outline'>{groupLabels[details.node.group] ?? details.node.group}</Badge>
               ) : null}
@@ -244,17 +275,21 @@ function PanelDetailsContent({
             size='sm'
             value={activeTab}
             onValueChange={(value) => {
-              if (value === 'transactions' || value === 'analytics') {
+              if (value === 'transactions' || value === 'analytics' || value === 'label') {
                 setActiveTab(value)
               }
             }}
+            // className='grid w-full grid-cols-3'
             className='grid w-full grid-cols-2'
           >
             <ToggleGroupItem value='transactions' aria-label='Transactions tab' className='w-full'>
               Transactions
             </ToggleGroupItem>
-            <ToggleGroupItem value='analytics' aria-label='Analytics tab' className='w-full'>
+            {/* <ToggleGroupItem value='analytics' aria-label='Analytics tab' className='w-full'>
               Analytics
+            </ToggleGroupItem> */}
+            <ToggleGroupItem value='label' aria-label='Label tab' className='w-full'>
+              Label
             </ToggleGroupItem>
           </ToggleGroup>
         </div>
@@ -330,6 +365,80 @@ function PanelDetailsContent({
               </AnalyticsSection>
             </div>
           </ScrollArea>
+          </div>
+        ) : null}
+
+        {activeTab === 'label' ? (
+          <div className='min-h-0 flex-1'>
+            <ScrollArea className='h-full'>
+              <div className='space-y-4 p-4'>
+                {onSaveLabel ? (
+                  <div className='space-y-2 rounded-md border border-border/70 bg-card/40 p-3'>
+                    <h3 className='text-xs font-medium uppercase tracking-wide text-muted-foreground'>Edit label</h3>
+                    <Input
+                      value={labelNameInput}
+                      placeholder='Label name'
+                      className='h-8 text-xs'
+                      onChange={(event) => setLabelNameInput(event.target.value)}
+                    />
+
+                    <div className='grid grid-cols-2 gap-1'>
+                      {ENTITY_CATEGORIES.map((category) => (
+                        <Button
+                          key={category}
+                          type='button'
+                          size='sm'
+                          variant={labelCategoryInput === category ? 'secondary' : 'ghost'}
+                          className='h-8 px-2 text-xs'
+                          onClick={() => setLabelCategoryInput(category)}
+                        >
+                          {category}
+                        </Button>
+                      ))}
+                    </div>
+
+                    {labelCategoryInput === 'sanctioned' ? (
+                      <div className='grid grid-cols-4 gap-1'>
+                        {SANCTION_LISTS.map((list) => (
+                          <Button
+                            key={list}
+                            type='button'
+                            size='sm'
+                            variant={sanctionListInput === list ? 'secondary' : 'ghost'}
+                            className='h-8 px-2 text-xs'
+                            onClick={() => setSanctionListInput(list)}
+                          >
+                            {list}
+                          </Button>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    <Button
+                      type='button'
+                      className='w-full px-3 text-xs'
+                      disabled={isSavingLabel}
+
+                      onClick={() => {
+                        const trimmed = labelNameInput.trim()
+                        if (!trimmed) {
+                          toast.error('Label name is required')
+                          return
+                        }
+                        void onSaveLabel({
+                          category: labelCategoryInput,
+                          labelName: trimmed,
+                          sanctionList: labelCategoryInput === 'sanctioned' ? sanctionListInput : null,
+                        })
+                      }}
+                    >
+                      {isSavingLabel ? <Loader2 className='size-3 animate-spin' /> : null}
+                      Save label
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            </ScrollArea>
           </div>
         ) : null}
       </div>
@@ -706,6 +815,16 @@ function shortAddress(address: string) {
     return address
   }
   return `${address.slice(0, 6)}…${address.slice(-4)}`
+}
+
+function formatAddressLabel(label: AddressLabel) {
+  if (label.labelName) {
+    return label.labelName
+  }
+  if (label.category === 'sanctioned' && label.sanctionList) {
+    return `sanctioned:${label.sanctionList}`
+  }
+  return label.category
 }
 
 function parseFormattedValue(value: string) {
