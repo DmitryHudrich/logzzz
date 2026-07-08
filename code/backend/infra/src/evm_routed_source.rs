@@ -79,7 +79,7 @@ impl Capability {
 }
 
 /// Per-capability chain of source NAMES (not Arcs) — the actual sources
-/// are stored once in `RoutedEthSourceBuilder::sources` so circuit-breaker
+/// are stored once in `RoutedEvmSourceBuilder::sources` so circuit-breaker
 /// state is shared across capabilities for the same underlying upstream.
 #[derive(Debug, Clone, Default)]
 pub struct RoutedChains {
@@ -89,14 +89,14 @@ pub struct RoutedChains {
     pub fetch_block: Vec<String>,
 }
 
-pub struct RoutedEthSourceBuilder {
+pub struct RoutedEvmSourceBuilder {
     chain_id: ChainId,
     sources: HashMap<String, Arc<dyn ChainSource>>,
     chains: RoutedChains,
     source_cooldown: Duration,
 }
 
-impl RoutedEthSourceBuilder {
+impl RoutedEvmSourceBuilder {
     pub fn new(chain_id: ChainId) -> Self {
         Self {
             chain_id,
@@ -126,7 +126,7 @@ impl RoutedEthSourceBuilder {
         self
     }
 
-    pub fn build(self) -> anyhow::Result<RoutedEthSource> {
+    pub fn build(self) -> anyhow::Result<RoutedEvmSource> {
         // Every name referenced in any chain must resolve to a registered
         // source — surfacing typos at boot beats silent fallbacks later.
         let mut all_referenced: HashSet<&str> = HashSet::new();
@@ -143,7 +143,7 @@ impl RoutedEthSourceBuilder {
         for name in &all_referenced {
             if !self.sources.contains_key(*name) {
                 anyhow::bail!(
-                    "RoutedEthSource: chain references unknown source '{name}' — \
+                    "RoutedEvmSource: chain references unknown source '{name}' — \
                      register it via .register('{name}', …) before .build()"
                 );
             }
@@ -170,7 +170,7 @@ impl RoutedEthSourceBuilder {
             "Routed ETH source initialized"
         );
 
-        Ok(RoutedEthSource {
+        Ok(RoutedEvmSource {
             chain_id: self.chain_id,
             sources: self.sources,
             cooldowns,
@@ -190,7 +190,7 @@ impl RoutedEthSourceBuilder {
 /// call (if Etherscan is in that chain too) will skip Etherscan for the
 /// same cooldown window. This avoids us hammering an upstream that's
 /// already throttling.
-pub struct RoutedEthSource {
+pub struct RoutedEvmSource {
     chain_id: ChainId,
     sources: HashMap<String, Arc<dyn ChainSource>>,
     cooldowns: HashMap<String, Arc<CooldownState>>,
@@ -222,9 +222,9 @@ impl std::fmt::Display for CooledEntry {
     }
 }
 
-impl RoutedEthSource {
-    pub fn builder(chain_id: ChainId) -> RoutedEthSourceBuilder {
-        RoutedEthSourceBuilder::new(chain_id)
+impl RoutedEvmSource {
+    pub fn builder(chain_id: ChainId) -> RoutedEvmSourceBuilder {
+        RoutedEvmSourceBuilder::new(chain_id)
     }
 
     fn chain_for(&self, cap: Capability) -> &[String] {
@@ -309,7 +309,7 @@ impl RoutedEthSource {
 }
 
 #[async_trait]
-impl ChainSource for RoutedEthSource {
+impl ChainSource for RoutedEvmSource {
     fn chain_id(&self) -> ChainId {
         self.chain_id
     }
@@ -644,7 +644,7 @@ mod tests {
             .queue_latest(Ok(BlockRef::new(ChainId::ETH, 42, [0u8; 32])));
         let b_calls = Arc::clone(&b.latest_calls);
 
-        let router = RoutedEthSource::builder(ChainId::ETH)
+        let router = RoutedEvmSource::builder(ChainId::ETH)
             .register("a", a)
             .register("b", b)
             .chains(RoutedChains {
@@ -669,7 +669,7 @@ mod tests {
             .queue_latest(Ok(BlockRef::new(ChainId::ETH, 1, [0u8; 32])));
         let b_calls = Arc::clone(&b.latest_calls);
 
-        let router = RoutedEthSource::builder(ChainId::ETH)
+        let router = RoutedEvmSource::builder(ChainId::ETH)
             .register("a", a)
             .register("b", b)
             .chains(RoutedChains {
@@ -696,7 +696,7 @@ mod tests {
             .queue_latest(Ok(BlockRef::new(ChainId::ETH, 2, [0u8; 32])));
         let b_calls = Arc::clone(&b.latest_calls);
 
-        let router = RoutedEthSource::builder(ChainId::ETH)
+        let router = RoutedEvmSource::builder(ChainId::ETH)
             .register("a", a)
             .register("b", b)
             .chains(RoutedChains {
@@ -724,7 +724,7 @@ mod tests {
         // treat None as soft-unknown which is the right degradation mode.
         let a = FakeSource::new(ChainId::ETH)
             .queue_is_contract(Err(DomainError::RateLimited("a".into())));
-        let router = RoutedEthSource::builder(ChainId::ETH)
+        let router = RoutedEvmSource::builder(ChainId::ETH)
             .register("a", a)
             .chains(RoutedChains {
                 is_contract: vec!["a".into()],
@@ -740,7 +740,7 @@ mod tests {
 
     #[test]
     fn build_rejects_unknown_source_name() {
-        let res = RoutedEthSource::builder(ChainId::ETH)
+        let res = RoutedEvmSource::builder(ChainId::ETH)
             .chains(RoutedChains {
                 transfers: vec!["ghost".into()],
                 ..Default::default()
@@ -763,7 +763,7 @@ mod tests {
                 "alchemy: rpc error -32007 Too many requests".into(),
             )));
 
-        let router = RoutedEthSource::builder(ChainId::ETH)
+        let router = RoutedEvmSource::builder(ChainId::ETH)
             .register("etherscan", a)
             .register("alchemy", b)
             .chains(RoutedChains {
@@ -855,7 +855,7 @@ mod tests {
         let b = MapSource::new(vec![(vec![0xCC; 20], true)]);
         let b_calls = Arc::clone(&b.batch_calls);
 
-        let router = RoutedEthSource::builder(ChainId::ETH)
+        let router = RoutedEvmSource::builder(ChainId::ETH)
             .register("a", a)
             .register("b", b)
             .chains(RoutedChains {
@@ -888,7 +888,7 @@ mod tests {
                 "etherscan: daily quota exhausted".into(),
             )));
 
-        let router = RoutedEthSource::builder(ChainId::ETH)
+        let router = RoutedEvmSource::builder(ChainId::ETH)
             .register("etherscan", a)
             .chains(RoutedChains {
                 latest_block: vec!["etherscan".into()],

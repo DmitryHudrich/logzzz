@@ -355,10 +355,4 @@ pub trait RiskPort: Send + Sync {
         &self,
         addr: &Address,
     ) -> DomainResult<Vec<Vec<Address>>>;
-
-    async fn save_cluster(
-        &self,
-        evidence: ClusterEvidence,
-        category: EntityCategory,
-    ) -> DomainResult<()>;
 }

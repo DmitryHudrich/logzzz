@@ -21,7 +21,7 @@ const ACCESS_TOKEN_SKEW_SECS: i64 = 30;
 const ERC20_DEFAULT_DECIMALS: u8 = 18;
 
 #[derive(Debug, Clone)]
-pub struct BigQueryEthConfig {
+pub struct BigQueryEvmConfig {
     project_id: String,
     credentials_path: PathBuf,
     transactions_table: String,
@@ -30,7 +30,7 @@ pub struct BigQueryEthConfig {
     query_timeout: Duration,
 }
 
-impl BigQueryEthConfig {
+impl BigQueryEvmConfig {
     pub fn new(
         project_id: String,
         credentials_path: PathBuf,
@@ -47,6 +47,21 @@ impl BigQueryEthConfig {
             max_rows_per_query,
             query_timeout,
         }
+    }
+
+    /// Override the transactions dataset table. Different chains live in
+    /// different BQ public datasets — `bigquery-public-data.crypto_ethereum.*`
+    /// for ETH, `crypto_polygon.*` for Polygon, etc. The default is ETH.
+    pub fn with_transactions_table(mut self, table: String) -> Self {
+        self.transactions_table = table;
+        self
+    }
+
+    /// Override (or unset) the ERC-20 transfers table. `None` disables
+    /// token-transfer harvesting entirely for this chain.
+    pub fn with_token_transfers_table(mut self, table: Option<String>) -> Self {
+        self.token_transfers_table = table;
+        self
     }
 }
 
@@ -66,7 +81,8 @@ struct CachedToken {
 }
 
 #[derive(Clone)]
-pub struct BigQueryEthSource {
+pub struct BigQueryEvmSource {
+    chain: ChainId,
     project_id: String,
     transactions_table: String,
     token_transfers_table: Option<String>,
@@ -77,8 +93,12 @@ pub struct BigQueryEthSource {
     cached_token: Arc<Mutex<Option<CachedToken>>>,
 }
 
-impl BigQueryEthSource {
-    pub async fn new(client: reqwest::Client, cfg: BigQueryEthConfig) -> DomainResult<Self> {
+impl BigQueryEvmSource {
+    pub async fn new(
+        chain: ChainId,
+        client: reqwest::Client,
+        cfg: BigQueryEvmConfig,
+    ) -> DomainResult<Self> {
         let raw = tokio::fs::read_to_string(&cfg.credentials_path)
             .await
             .map_err(|e| {
@@ -99,10 +119,12 @@ impl BigQueryEthSource {
             transactions_table = %cfg.transactions_table,
             token_transfers_table = ?cfg.token_transfers_table,
             client_email = %sa.client_email,
-            "BigQuery ETH source initialized"
+            chain_id = chain.value(),
+            "BigQuery EVM source initialized"
         );
 
         Ok(Self {
+            chain,
             project_id: cfg.project_id,
             transactions_table: cfg.transactions_table,
             token_transfers_table: cfg.token_transfers_table,
@@ -308,7 +330,7 @@ impl BigQueryEthSource {
         let mut out = Vec::new();
         if let Some(rows) = resp.rows {
             for (idx, row) in rows.into_iter().enumerate() {
-                match map_native_row(&row) {
+                match map_native_row(self.chain, &row) {
                     Ok(Some(t)) => out.push(t),
                     Ok(None) => {}
                     Err(e) => {
@@ -365,7 +387,7 @@ impl BigQueryEthSource {
         let mut out = Vec::new();
         if let Some(rows) = resp.rows {
             for (idx, row) in rows.into_iter().enumerate() {
-                match map_erc20_row(&row) {
+                match map_erc20_row(self.chain, &row) {
                     Ok(t) => out.push(t),
                     Err(e) => {
                         tracing::warn!(idx, error = %e, "BigQuery: skip malformed erc20 row");
@@ -378,9 +400,9 @@ impl BigQueryEthSource {
 }
 
 #[async_trait]
-impl ChainSource for BigQueryEthSource {
+impl ChainSource for BigQueryEvmSource {
     fn chain_id(&self) -> ChainId {
-        ChainId::ETH
+        self.chain
     }
 
     async fn latest_block(&self) -> DomainResult<BlockRef> {
@@ -401,7 +423,7 @@ impl ChainSource for BigQueryEthSource {
                 )
             })?;
         tracing::debug!(height, "BigQuery: latest_block resolved");
-        Ok(BlockRef::new(ChainId::ETH, height, [0u8; 32]))
+        Ok(BlockRef::new(self.chain, height, [0u8; 32]))
     }
 
     async fn fetch_block(&self, height: u64) -> DomainResult<NormalizedBlock> {
@@ -416,9 +438,10 @@ impl ChainSource for BigQueryEthSource {
         range: BlockRange,
         max_transfers: usize,
     ) -> DomainResult<Vec<Transfer>> {
-        if addr.chain() != ChainId::ETH {
+        if addr.chain() != self.chain {
             return Err(DomainError::InsufficientData(format!(
-                "BigQuery ETH source called with non-eth chain: {}",
+                "BigQuery source (chain={}) called with foreign address chain: {}",
+                self.chain,
                 addr.chain()
             )));
         }
@@ -555,7 +578,7 @@ fn field_str(row: &Row, idx: usize) -> Option<&str> {
 
 // ── Row mappers ──────────────────────────────────────────────────────────────
 
-fn map_native_row(row: &Row) -> anyhow::Result<Option<Transfer>> {
+fn map_native_row(chain: ChainId, row: &Row) -> anyhow::Result<Option<Transfer>> {
     use anyhow::{Context, anyhow};
 
     let hash = field_str(row, 0).ok_or_else(|| anyhow!("native: missing transaction_hash"))?;
@@ -582,25 +605,25 @@ fn map_native_row(row: &Row) -> anyhow::Result<Option<Transfer>> {
     if raw.is_zero() {
         return Ok(None);
     }
-    let from = parse_eth_address(from_s).context("native: from_address")?;
-    let to = parse_eth_address(to_s).context("native: to_address")?;
+    let from = parse_eth_address(chain, from_s).context("native: from_address")?;
+    let to = parse_eth_address(chain, to_s).context("native: to_address")?;
 
     Ok(Some(Transfer::new(
-        TransferId::new(ChainId::ETH, tx_hash, 0),
-        ChainId::ETH,
-        TxRef::new(ChainId::ETH, tx_hash),
+        TransferId::new(chain, tx_hash, 0),
+        chain,
+        TxRef::new(chain, tx_hash),
         from,
         to,
-        AssetId::native(ChainId::ETH),
+        AssetId::native(chain),
         Amount::new(raw, 18),
-        BlockRef::new(ChainId::ETH, block_number, block_hash),
+        BlockRef::new(chain, block_number, block_hash),
         timestamp,
         TransferKind::Native,
         Finality::Confirmed,
     )))
 }
 
-fn map_erc20_row(row: &Row) -> anyhow::Result<Transfer> {
+fn map_erc20_row(chain: ChainId, row: &Row) -> anyhow::Result<Transfer> {
     use anyhow::{Context, anyhow};
 
     let token_addr_s = field_str(row, 0).ok_or_else(|| anyhow!("erc20: missing token_address"))?;
@@ -634,19 +657,19 @@ fn map_erc20_row(row: &Row) -> anyhow::Result<Transfer> {
     let idx = event_index.saturating_add(1);
     let raw = parse_u256_from_bq(value_s).context("erc20: value")?;
 
-    let from = parse_eth_address(from_s).context("erc20: from_address")?;
-    let to = parse_eth_address(to_s).context("erc20: to_address")?;
-    let contract = parse_eth_address(token_addr_s).context("erc20: token_address")?;
+    let from = parse_eth_address(chain, from_s).context("erc20: from_address")?;
+    let to = parse_eth_address(chain, to_s).context("erc20: to_address")?;
+    let contract = parse_eth_address(chain, token_addr_s).context("erc20: token_address")?;
 
     Ok(Transfer::new(
-        TransferId::new(ChainId::ETH, tx_hash, idx),
-        ChainId::ETH,
-        TxRef::new(ChainId::ETH, tx_hash),
+        TransferId::new(chain, tx_hash, idx),
+        chain,
+        TxRef::new(chain, tx_hash),
         from,
         to,
-        AssetId::contract(ChainId::ETH, contract.bytes().to_vec()),
+        AssetId::contract(chain, contract.bytes().to_vec()),
         Amount::new(raw, ERC20_DEFAULT_DECIMALS),
-        BlockRef::new(ChainId::ETH, block_number, block_hash),
+        BlockRef::new(chain, block_number, block_hash),
         timestamp,
         TransferKind::Token {
             contract,
@@ -666,14 +689,14 @@ fn parse_hash32(s: &str) -> anyhow::Result<[u8; 32]> {
         .map_err(|v: Vec<u8>| anyhow!("expected 32 bytes, got {}", v.len()))
 }
 
-fn parse_eth_address(s: &str) -> anyhow::Result<Address> {
+fn parse_eth_address(chain: ChainId, s: &str) -> anyhow::Result<Address> {
     use anyhow::Context;
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).context("hex decode eth address")?;
     if bytes.len() != 20 {
         anyhow::bail!("eth address expected 20 bytes, got {}", bytes.len());
     }
-    Ok(Address::new(ChainId::ETH, bytes))
+    Ok(Address::new(chain, bytes))
 }
 
 fn parse_u256_from_bq(s: &str) -> anyhow::Result<U256> {

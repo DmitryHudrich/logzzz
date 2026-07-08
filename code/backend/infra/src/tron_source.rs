@@ -47,6 +47,13 @@ impl TronGridConfig {
             max_pages_per_endpoint,
         }
     }
+
+    /// Per-chain endpoint override (Tron mainnet vs Shasta testnet vs
+    /// self-hosted node). The default is `api.trongrid.io`.
+    pub fn with_base_url(mut self, url: String) -> Self {
+        self.base_url = url;
+        self
+    }
 }
 
 impl Default for TronGridConfig {

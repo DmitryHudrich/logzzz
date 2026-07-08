@@ -1,3 +1,4 @@
+use crate::address_codec::AddressCodec;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -15,6 +16,16 @@ impl ChainId {
 
     pub fn value(self) -> u32 {
         self.0
+    }
+
+    pub fn default_encoding(self) -> AddressEncoding {
+        match self {
+            Self::ETH => AddressEncoding::Hex20,
+            Self::TRON => AddressEncoding::TronBase58Check,
+            Self::BTC => AddressEncoding::Bech32,
+            Self::SOLANA => AddressEncoding::Base58,
+            _ => AddressEncoding::Hex20,
+        }
     }
 }
 
@@ -129,6 +140,10 @@ impl ChainMeta {
 
     pub fn native_asset_decimals(&self) -> u8 {
         self.native_asset_decimals
+    }
+
+    pub fn codec(&self) -> &'static dyn AddressCodec {
+        self.address_encoding.codec()
     }
 }
 

@@ -150,11 +150,11 @@ impl MoralisConfig {
         &self.cache
     }
 
-    /// Build the domain-level `MoralisEthConfig` so main.rs doesn't need
+    /// Build the domain-level `MoralisEvmConfig` so main.rs doesn't need
     /// to thread every knob through the constructor.
-    pub fn into_domain(self) -> infra::fetch_wallet_api::MoralisEthConfig {
+    pub fn into_domain(self) -> infra::fetch_wallet_api::MoralisEvmConfig {
         let keys = self.resolved_keys();
-        infra::fetch_wallet_api::MoralisEthConfig::new(
+        infra::fetch_wallet_api::MoralisEvmConfig::new(
             keys,
             self.base_url,
             self.cache.into_domain(),
@@ -494,6 +494,10 @@ pub struct HeuristicsConfigFile {
     min_fanout: usize,
     #[serde(default = "HeuristicsConfigFile::default_min_fanin")]
     min_fanin: usize,
+    #[serde(default = "HeuristicsConfigFile::default_max_fanout")]
+    max_fanout: usize,
+    #[serde(default = "HeuristicsConfigFile::default_max_fanin")]
+    max_fanin: usize,
     #[serde(default = "HeuristicsConfigFile::default_fan_window_secs")]
     fan_window_secs: u64,
     #[serde(default = "HeuristicsConfigFile::default_smurf_window_secs")]
@@ -516,6 +520,10 @@ pub struct HeuristicsConfigFile {
     dwell_max_secs: u64,
     #[serde(default = "HeuristicsConfigFile::default_dwell_min_pairs")]
     dwell_min_pairs: usize,
+    #[serde(default = "HeuristicsConfigFile::default_deposit_reuse_min_incoming")]
+    deposit_reuse_min_incoming: usize,
+    #[serde(default = "HeuristicsConfigFile::default_deposit_reuse_min_senders")]
+    deposit_reuse_min_senders: usize,
 }
 
 impl Default for HeuristicsConfigFile {
@@ -523,6 +531,8 @@ impl Default for HeuristicsConfigFile {
         Self {
             min_fanout: Self::default_min_fanout(),
             min_fanin: Self::default_min_fanin(),
+            max_fanout: Self::default_max_fanout(),
+            max_fanin: Self::default_max_fanin(),
             fan_window_secs: Self::default_fan_window_secs(),
             smurf_window_secs: Self::default_smurf_window_secs(),
             smurf_max_depth: Self::default_smurf_max_depth(),
@@ -534,6 +544,8 @@ impl Default for HeuristicsConfigFile {
             fixed_amount_bucket_usd: Self::default_fixed_amount_bucket_usd(),
             dwell_max_secs: Self::default_dwell_max_secs(),
             dwell_min_pairs: Self::default_dwell_min_pairs(),
+            deposit_reuse_min_incoming: Self::default_deposit_reuse_min_incoming(),
+            deposit_reuse_min_senders: Self::default_deposit_reuse_min_senders(),
         }
     }
 }
@@ -544,6 +556,12 @@ impl HeuristicsConfigFile {
     }
     fn default_min_fanin() -> usize {
         5
+    }
+    fn default_max_fanout() -> usize {
+        200
+    }
+    fn default_max_fanin() -> usize {
+        200
     }
     fn default_fan_window_secs() -> u64 {
         86_400
@@ -575,11 +593,19 @@ impl HeuristicsConfigFile {
     fn default_dwell_min_pairs() -> usize {
         5
     }
+    fn default_deposit_reuse_min_incoming() -> usize {
+        3
+    }
+    fn default_deposit_reuse_min_senders() -> usize {
+        2
+    }
 
     pub fn into_domain(self) -> usecase::risk::HeuristicsConfig {
         usecase::risk::HeuristicsConfig {
             min_fanout: self.min_fanout,
             min_fanin: self.min_fanin,
+            max_fanout: self.max_fanout,
+            max_fanin: self.max_fanin,
             fan_window: Duration::from_secs(self.fan_window_secs),
             smurf_window: Duration::from_secs(self.smurf_window_secs),
             smurf_max_depth: self.smurf_max_depth,
@@ -591,6 +617,8 @@ impl HeuristicsConfigFile {
             fixed_amount_bucket_usd: self.fixed_amount_bucket_usd,
             dwell_max_secs: self.dwell_max_secs,
             dwell_min_pairs: self.dwell_min_pairs,
+            deposit_reuse_min_incoming: self.deposit_reuse_min_incoming,
+            deposit_reuse_min_senders: self.deposit_reuse_min_senders,
         }
     }
 }
@@ -614,6 +642,69 @@ pub struct ProxyConfig {
 impl ProxyConfig {
     pub fn socks_url(&self) -> Option<&str> {
         self.socks_url.as_deref()
+    }
+}
+
+/// CORS knobs applied to the outer axum router. Each list accepts either
+/// `["*"]` / `[]` (Any) or an explicit whitelist of exact values. Setting
+/// `allow_credentials: true` together with a wildcard in any of the three
+/// lists is a CORS spec violation and is rejected at startup.
+#[derive(Deserialize, Debug, Clone)]
+pub struct CorsConfig {
+    #[serde(default = "CorsConfig::default_star")]
+    allow_origins: Vec<String>,
+    #[serde(default = "CorsConfig::default_star")]
+    allow_methods: Vec<String>,
+    #[serde(default = "CorsConfig::default_star")]
+    allow_headers: Vec<String>,
+    #[serde(default)]
+    expose_headers: Vec<String>,
+    #[serde(default)]
+    allow_credentials: bool,
+    #[serde(default)]
+    max_age_secs: Option<u64>,
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self {
+            allow_origins: Self::default_star(),
+            allow_methods: Self::default_star(),
+            allow_headers: Self::default_star(),
+            expose_headers: Vec::new(),
+            allow_credentials: false,
+            max_age_secs: None,
+        }
+    }
+}
+
+impl CorsConfig {
+    fn default_star() -> Vec<String> {
+        vec!["*".into()]
+    }
+
+    pub fn allow_origins(&self) -> &[String] {
+        &self.allow_origins
+    }
+
+    pub fn allow_methods(&self) -> &[String] {
+        &self.allow_methods
+    }
+
+    pub fn allow_headers(&self) -> &[String] {
+        &self.allow_headers
+    }
+
+    pub fn expose_headers(&self) -> &[String] {
+        &self.expose_headers
+    }
+
+    pub fn allow_credentials(&self) -> bool {
+        self.allow_credentials
+    }
+
+    pub fn max_age(&self) -> Option<Duration> {
+        self.max_age_secs.map(Duration::from_secs)
     }
 }
 
@@ -721,8 +812,8 @@ impl BigQueryConfig {
         &self.credentials_path
     }
 
-    pub fn into_domain(self) -> infra::BigQueryEthConfig {
-        infra::BigQueryEthConfig::new(
+    pub fn into_domain(self) -> infra::BigQueryEvmConfig {
+        infra::BigQueryEvmConfig::new(
             self.project_id,
             std::path::PathBuf::from(self.credentials_path),
             self.transactions_table,
@@ -862,9 +953,9 @@ impl EtherscanConfigFile {
         !self.resolved_keys().is_empty()
     }
 
-    pub fn into_domain(self) -> infra::EtherscanEthConfig {
+    pub fn into_domain(self) -> infra::EtherscanEvmConfig {
         let keys = self.resolved_keys();
-        infra::EtherscanEthConfig::new(
+        infra::EtherscanEvmConfig::new(
             keys,
             Some(self.base_url),
             self.page_size,
@@ -943,7 +1034,7 @@ pub struct AlchemyConfigFile {
 
 impl AlchemyConfigFile {
     fn default_base_url() -> String {
-        infra::alchemy_eth_source::DEFAULT_BASE_URL.into()
+        infra::alchemy_evm_source::DEFAULT_BASE_URL.into()
     }
     fn default_key_cooldown_secs() -> u64 {
         5
@@ -1016,9 +1107,9 @@ impl AlchemyConfigFile {
         !self.resolved_keys().is_empty()
     }
 
-    pub fn into_domain(self) -> infra::AlchemyEthConfig {
+    pub fn into_domain(self) -> infra::AlchemyEvmConfig {
         let keys = self.resolved_keys();
-        infra::AlchemyEthConfig::new(
+        infra::AlchemyEvmConfig::new(
             keys,
             Some(self.base_url),
             Some(Duration::from_secs(self.key_cooldown_secs)),
@@ -1106,6 +1197,106 @@ impl EtherscanFileCacheConfig {
     }
 }
 
+/// Per-chain source spec inside the `chains: [...]` list. Each chain declares
+/// which upstream (or router) serves it; provider-specific pools of API keys
+/// and throttles stay in the top-level `alchemy:`/`etherscan:`/`moralis:`/
+/// `trongrid:` sections. Overrides (`base_url`, table names) are folded on top
+/// of those defaults at wire-up time.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ChainSourceSpec {
+    Etherscan {
+        #[serde(default)]
+        base_url: Option<String>,
+    },
+    Alchemy {
+        /// Chain-specific Alchemy endpoint. When absent, uses `alchemy.base_url`
+        /// from the top-level section (which is ETH-mainnet by default).
+        /// For non-ETH deployments you MUST override — Alchemy's chain-specific
+        /// hosts (polygon-mainnet.g.alchemy.com, base-mainnet.g.alchemy.com, ...)
+        /// share the pool of API keys but differ in URL.
+        #[serde(default)]
+        base_url: Option<String>,
+    },
+    Moralis,
+    Bigquery {
+        #[serde(default)]
+        transactions_table: Option<String>,
+        #[serde(default)]
+        token_transfers_table: Option<String>,
+    },
+    Trongrid {
+        #[serde(default)]
+        base_url: Option<String>,
+    },
+    Routed {
+        #[serde(default)]
+        transfers: Vec<String>,
+        #[serde(default)]
+        is_contract: Vec<String>,
+        #[serde(default)]
+        latest_block: Vec<String>,
+        #[serde(default)]
+        fetch_block: Vec<String>,
+        #[serde(default)]
+        source_cooldown_secs: Option<u64>,
+    },
+}
+
+impl ChainSourceSpec {
+    /// Names of leaf providers this spec references. For `routed`, that's the
+    /// union of every capability chain; for a single-source spec, it's the
+    /// one provider it names. Used by main.rs to build only what's needed.
+    pub fn referenced_providers(&self) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        match self {
+            ChainSourceSpec::Etherscan { .. } => {
+                out.insert("etherscan".to_string());
+            }
+            ChainSourceSpec::Alchemy { .. } => {
+                out.insert("alchemy".to_string());
+            }
+            ChainSourceSpec::Moralis => {
+                out.insert("moralis".to_string());
+            }
+            ChainSourceSpec::Bigquery { .. } => {
+                out.insert("bigquery".to_string());
+            }
+            ChainSourceSpec::Trongrid { .. } => {
+                out.insert("trongrid".to_string());
+            }
+            ChainSourceSpec::Routed {
+                transfers,
+                is_contract,
+                latest_block,
+                fetch_block,
+                ..
+            } => {
+                for v in [transfers, is_contract, latest_block, fetch_block] {
+                    for n in v {
+                        out.insert(n.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct ChainConfigFile {
+    /// Numeric chain id — must match `domain::chain::ChainId` values (1 = ETH
+    /// mainnet, 137 = Polygon, 56 = BSC, 195 = Tron, etc). Duplicate ids are
+    /// rejected at startup.
+    pub id: u32,
+    /// Optional human-readable name; if omitted, `ChainRegistry::default_registry`
+    /// value (or `"chain:<id>"`) is used in logs. This is purely cosmetic.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Which upstream (or router) serves this chain.
+    pub source: ChainSourceSpec,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     server: ServerConfig,
@@ -1122,11 +1313,17 @@ pub struct AppConfig {
     routed: Option<RoutedConfigFile>,
     #[serde(default)]
     ethereum: EthereumConfig,
+    /// New: per-chain wire-up. When non-empty, replaces the legacy
+    /// `ethereum:` / `trongrid.enabled:` path entirely.
+    #[serde(default)]
+    chains: Vec<ChainConfigFile>,
     database: DatabaseConfig,
     proxy: ProxyConfig,
     log: LogConfig,
     #[serde(default)]
     telemetry: TelemetryConfig,
+    #[serde(default)]
+    cors: CorsConfig,
     #[serde(default)]
     risk_cache: RiskCacheConfigFile,
     #[serde(default)]
@@ -1137,6 +1334,8 @@ pub struct AppConfig {
     labels: LabelsConfigFile,
     #[serde(default)]
     ingestion: IngestionConfigFile,
+    #[serde(default)]
+    api: ApiConfig,
 }
 
 /// Tunables for adaptive concurrency in the ingestion pipeline. The gate
@@ -1210,6 +1409,36 @@ impl TransfersConcurrencyConfig {
     }
 }
 
+/// Cross-cutting API knobs that don't fit into more specific sections.
+///
+/// `default_chain_id` — the chain used when a request omits `chain_id`. Historically
+/// hard-coded to 1 (ETH); making it a config value is the first step to running
+/// this server against a non-Ethereum primary chain (Polygon, BSC, ...). Requests
+/// that still want ETH just pass `chain_id=1` explicitly.
+#[derive(Deserialize, Debug, Clone)]
+pub struct ApiConfig {
+    #[serde(default = "ApiConfig::default_chain_id_default")]
+    default_chain_id: u32,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            default_chain_id: Self::default_chain_id_default(),
+        }
+    }
+}
+
+impl ApiConfig {
+    fn default_chain_id_default() -> u32 {
+        1
+    }
+
+    pub fn default_chain_id(&self) -> u32 {
+        self.default_chain_id
+    }
+}
+
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct LabelsConfigFile {
     #[serde(default)]
@@ -1251,6 +1480,10 @@ impl AppConfig {
         &self.telemetry
     }
 
+    pub fn cors(&self) -> &CorsConfig {
+        &self.cors
+    }
+
     pub fn risk_cache(&self) -> &RiskCacheConfigFile {
         &self.risk_cache
     }
@@ -1269,6 +1502,14 @@ impl AppConfig {
 
     pub fn ingestion(&self) -> &IngestionConfigFile {
         &self.ingestion
+    }
+
+    pub fn api(&self) -> &ApiConfig {
+        &self.api
+    }
+
+    pub fn chains(&self) -> &[ChainConfigFile] {
+        &self.chains
     }
 
     pub fn ethereum(&self) -> &EthereumConfig {

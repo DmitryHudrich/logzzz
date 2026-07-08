@@ -36,7 +36,7 @@ const DEFAULT_REQUESTS_PER_SECOND: f64 = 5.0;
 const DEFAULT_REQUESTS_PER_SECOND_BURST: f64 = 5.0;
 
 #[derive(Debug, Clone)]
-pub struct EtherscanEthConfig {
+pub struct EtherscanEvmConfig {
     api_keys: Vec<String>,
     base_url: String,
     page_size: u32,
@@ -56,7 +56,7 @@ pub struct EtherscanEthConfig {
     is_contract_max_attempts: u8,
 }
 
-impl EtherscanEthConfig {
+impl EtherscanEvmConfig {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         api_keys: Vec<String>,
@@ -109,6 +109,14 @@ impl EtherscanEthConfig {
     pub fn has_keys(&self) -> bool {
         !self.api_keys.is_empty()
     }
+
+    /// Chain-specific override for the API base URL. Etherscan V2 uses one
+    /// canonical URL and a `chainid=` query param, so most deployments never
+    /// need this; kept for private/proxied etherscan-compatible endpoints.
+    pub fn with_base_url(mut self, url: String) -> Self {
+        self.base_url = url;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -148,7 +156,8 @@ struct PageKey {
 type PageValue = Arc<Vec<serde_json::Value>>;
 
 #[derive(Clone)]
-pub struct EtherscanEthSource {
+pub struct EtherscanEvmSource {
+    chain: ChainId,
     key_pool: KeyPool,
     base_url: String,
     page_size: u32,
@@ -168,11 +177,11 @@ pub struct EtherscanEthSource {
     rate_limiter: Arc<RateLimiter>,
 }
 
-impl EtherscanEthSource {
-    pub async fn new(client: reqwest::Client, cfg: EtherscanEthConfig) -> Self {
+impl EtherscanEvmSource {
+    pub async fn new(chain: ChainId, client: reqwest::Client, cfg: EtherscanEvmConfig) -> Self {
         assert!(
             cfg.has_keys(),
-            "EtherscanEthSource: at least one api key required — config validation must guard this"
+            "EtherscanEvmSource: at least one api key required — config validation must guard this"
         );
         let key_pool = KeyPool::new(cfg.api_keys.clone(), cfg.key_cooldown);
         let cold_page_cache = Cache::builder()
@@ -227,10 +236,12 @@ impl EtherscanEthSource {
             requests_per_second_burst = cfg.requests_per_second_burst,
             http_max_attempts = cfg.http_max_attempts,
             is_contract_max_attempts = cfg.is_contract_max_attempts,
-            "Etherscan ETH source initialized"
+            chain_id = chain.value(),
+            "Etherscan EVM source initialized"
         );
 
         Self {
+            chain,
             key_pool,
             base_url: cfg.base_url,
             page_size: cfg.page_size,
@@ -616,14 +627,14 @@ impl EtherscanEthSource {
 }
 
 #[async_trait]
-impl ChainSource for EtherscanEthSource {
+impl ChainSource for EtherscanEvmSource {
     fn chain_id(&self) -> ChainId {
-        ChainId::ETH
+        self.chain
     }
 
     async fn latest_block(&self) -> DomainResult<BlockRef> {
         match self.latest_block_height().await {
-            Some(h) => Ok(BlockRef::new(ChainId::ETH, h, [0u8; 32])),
+            Some(h) => Ok(BlockRef::new(self.chain, h, [0u8; 32])),
             None => Err(DomainError::InsufficientData(
                 "etherscan: eth_blockNumber failed".into(),
             )),
@@ -642,9 +653,10 @@ impl ChainSource for EtherscanEthSource {
         range: BlockRange,
         max_transfers: usize,
     ) -> DomainResult<Vec<Transfer>> {
-        if addr.chain() != ChainId::ETH {
+        if addr.chain() != self.chain {
             return Err(DomainError::InsufficientData(format!(
-                "etherscan source called with non-eth chain: {}",
+                "etherscan source (chain={}) called with foreign address chain: {}",
+                self.chain,
                 addr.chain()
             )));
         }
@@ -686,7 +698,7 @@ impl ChainSource for EtherscanEthSource {
 
         let mut native = Vec::with_capacity(native_raw.len());
         for raw in native_raw {
-            match map_native(&raw) {
+            match map_native(self.chain, &raw) {
                 Ok(Some(t)) => native.push(t),
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = %e, "etherscan: skip malformed native row"),
@@ -699,7 +711,7 @@ impl ChainSource for EtherscanEthSource {
 
         let mut internal = Vec::with_capacity(internal_raw.len());
         for raw in internal_raw {
-            match map_internal(&raw, &mut by_tx) {
+            match map_internal(self.chain, &raw, &mut by_tx) {
                 Ok(Some(t)) => internal.push(t),
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = %e, "etherscan: skip malformed internal row"),
@@ -708,7 +720,7 @@ impl ChainSource for EtherscanEthSource {
 
         let mut token = Vec::with_capacity(token_raw.len());
         for raw in token_raw {
-            match map_token(&raw, &mut by_tx) {
+            match map_token(self.chain, &raw, &mut by_tx) {
                 Ok(Some(t)) => token.push(t),
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = %e, "etherscan: skip malformed token row"),
@@ -734,7 +746,7 @@ impl ChainSource for EtherscanEthSource {
     }
 
     async fn is_contract(&self, addr: &Address) -> DomainResult<Option<bool>> {
-        if addr.chain() != ChainId::ETH {
+        if addr.chain() != self.chain {
             return Ok(None);
         }
 
@@ -771,7 +783,7 @@ impl ChainSource for EtherscanEthSource {
         let mut out: Vec<Option<bool>> = vec![None; addrs.len()];
         let mut to_fetch: Vec<(usize, &Address)> = Vec::new();
         for (i, addr) in addrs.iter().enumerate() {
-            if addr.chain() != ChainId::ETH {
+            if addr.chain() != self.chain {
                 continue;
             }
             let bytes = addr.bytes().to_vec();
@@ -808,7 +820,7 @@ impl ChainSource for EtherscanEthSource {
     }
 }
 
-impl EtherscanEthSource {
+impl EtherscanEvmSource {
     /// Mine the raw `txlist`/`txlistinternal`/`tokentx` responses we already
     /// have in hand for address-kind signals so that the follow-up
     /// `is_contract` pass (driven by `classify_address_kinds` in the use-case)
@@ -865,7 +877,7 @@ impl EtherscanEthSource {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                if let Ok(addr) = parse_eth_address(from_s) {
+                if let Ok(addr) = parse_eth_address(self.chain, from_s) {
                     confirmed_eoa.insert(addr.bytes().to_vec());
                 }
             }
@@ -877,7 +889,7 @@ impl EtherscanEthSource {
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
                 {
-                    if let Ok(addr) = parse_eth_address(to_s) {
+                    if let Ok(addr) = parse_eth_address(self.chain, to_s) {
                         confirmed_contract.insert(addr.bytes().to_vec());
                     }
                 }
@@ -888,7 +900,7 @@ impl EtherscanEthSource {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty() && *s != "0x")
             {
-                if let Ok(addr) = parse_eth_address(c) {
+                if let Ok(addr) = parse_eth_address(self.chain, c) {
                     confirmed_contract.insert(addr.bytes().to_vec());
                 }
             }
@@ -902,7 +914,7 @@ impl EtherscanEthSource {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                if let Ok(addr) = parse_eth_address(from_s) {
+                if let Ok(addr) = parse_eth_address(self.chain, from_s) {
                     confirmed_contract.insert(addr.bytes().to_vec());
                 }
             }
@@ -916,7 +928,7 @@ impl EtherscanEthSource {
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty() && *s != "0x")
                 {
-                    if let Ok(addr) = parse_eth_address(c) {
+                    if let Ok(addr) = parse_eth_address(self.chain, c) {
                         confirmed_contract.insert(addr.bytes().to_vec());
                     }
                 }
@@ -929,7 +941,7 @@ impl EtherscanEthSource {
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
                 {
-                    if let Ok(addr) = parse_eth_address(to_s) {
+                    if let Ok(addr) = parse_eth_address(self.chain, to_s) {
                         confirmed_contract.insert(addr.bytes().to_vec());
                     }
                 }
@@ -943,7 +955,7 @@ impl EtherscanEthSource {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                if let Ok(addr) = parse_eth_address(c) {
+                if let Ok(addr) = parse_eth_address(self.chain, c) {
                     confirmed_contract.insert(addr.bytes().to_vec());
                 }
             }
@@ -1182,7 +1194,7 @@ impl EtherscanResponse {
     }
 }
 
-fn map_native(raw: &serde_json::Value) -> anyhow::Result<Option<Transfer>> {
+fn map_native(chain: ChainId, raw: &serde_json::Value) -> anyhow::Result<Option<Transfer>> {
     use anyhow::{Context, anyhow};
 
     if raw.get("isError").and_then(|v| v.as_str()) == Some("1") {
@@ -1235,8 +1247,8 @@ fn map_native(raw: &serde_json::Value) -> anyhow::Result<Option<Transfer>> {
         .single()
         .ok_or_else(|| anyhow!("native: bad timestamp {ts_secs}"))?;
 
-    let from = parse_eth_address(from_s).context("native: from")?;
-    let to = parse_eth_address(to_s).context("native: to")?;
+    let from = parse_eth_address(chain, from_s).context("native: from")?;
+    let to = parse_eth_address(chain, to_s).context("native: to")?;
 
     let finality = match raw.get("txreceipt_status").and_then(|v| v.as_str()) {
         Some("0") => Finality::Reorged,
@@ -1244,14 +1256,14 @@ fn map_native(raw: &serde_json::Value) -> anyhow::Result<Option<Transfer>> {
     };
 
     Ok(Some(Transfer::new(
-        TransferId::new(ChainId::ETH, tx_hash, 0),
-        ChainId::ETH,
-        TxRef::new(ChainId::ETH, tx_hash),
+        TransferId::new(chain, tx_hash, 0),
+        chain,
+        TxRef::new(chain, tx_hash),
         from,
         to,
-        AssetId::native(ChainId::ETH),
+        AssetId::native(chain),
         Amount::new(raw_val, 18),
-        BlockRef::new(ChainId::ETH, block_number, block_hash),
+        BlockRef::new(chain, block_number, block_hash),
         timestamp,
         TransferKind::Native,
         finality,
@@ -1272,6 +1284,7 @@ fn map_native(raw: &serde_json::Value) -> anyhow::Result<Option<Transfer>> {
 /// `to` is empty for `create`/`create2` rows; in that case the destination
 /// is the freshly-deployed contract address sitting in `contractAddress`.
 fn map_internal(
+    chain: ChainId,
     raw: &serde_json::Value,
     by_tx: &mut HashMap<[u8; 32], u32>,
 ) -> anyhow::Result<Option<Transfer>> {
@@ -1335,8 +1348,8 @@ fn map_internal(
         .single()
         .ok_or_else(|| anyhow!("internal: bad timestamp {ts_secs}"))?;
 
-    let from = parse_eth_address(from_s).context("internal: from")?;
-    let to = parse_eth_address(&dest_s).context("internal: to")?;
+    let from = parse_eth_address(chain, from_s).context("internal: from")?;
+    let to = parse_eth_address(chain, &dest_s).context("internal: to")?;
 
     // idx=0 is reserved for the outer native value transfer (txlist row);
     // bump per row within the same tx — shared counter with token rows in
@@ -1346,17 +1359,17 @@ fn map_internal(
     *position += 1;
 
     Ok(Some(Transfer::new(
-        TransferId::new(ChainId::ETH, tx_hash, idx),
-        ChainId::ETH,
-        TxRef::new(ChainId::ETH, tx_hash),
+        TransferId::new(chain, tx_hash, idx),
+        chain,
+        TxRef::new(chain, tx_hash),
         from,
         to,
-        AssetId::native(ChainId::ETH),
+        AssetId::native(chain),
         Amount::new(raw_val, 18),
         // Internal rows don't carry blockHash; fall back to tx_hash like
         // map_native does for the same reason. Reorg classification is
         // driven by block height + confirmation_depth, not by hash equality.
-        BlockRef::new(ChainId::ETH, block_number, tx_hash),
+        BlockRef::new(chain, block_number, tx_hash),
         timestamp,
         TransferKind::Native,
         Finality::Confirmed,
@@ -1364,6 +1377,7 @@ fn map_internal(
 }
 
 fn map_token(
+    chain: ChainId,
     raw: &serde_json::Value,
     by_tx: &mut HashMap<[u8; 32], u32>,
 ) -> anyhow::Result<Option<Transfer>> {
@@ -1427,9 +1441,9 @@ fn map_token(
         .unwrap_or(18);
     let raw_val = U256::from_dec_str(value_s).context("token: value")?;
 
-    let from = parse_eth_address(from_s).context("token: from")?;
-    let to = parse_eth_address(to_s).context("token: to")?;
-    let contract = parse_eth_address(contract_s).context("token: contractAddress")?;
+    let from = parse_eth_address(chain, from_s).context("token: from")?;
+    let to = parse_eth_address(chain, to_s).context("token: to")?;
+    let contract = parse_eth_address(chain, contract_s).context("token: contractAddress")?;
 
     // idx=0 is reserved for the (single) native transfer in this tx; shift
     // token rows by +1 so they never collide on the (chain, tx_hash, idx) PK
@@ -1439,14 +1453,14 @@ fn map_token(
     *position += 1;
 
     Ok(Some(Transfer::new(
-        TransferId::new(ChainId::ETH, tx_hash, idx),
-        ChainId::ETH,
-        TxRef::new(ChainId::ETH, tx_hash),
+        TransferId::new(chain, tx_hash, idx),
+        chain,
+        TxRef::new(chain, tx_hash),
         from,
         to,
-        AssetId::contract(ChainId::ETH, contract.bytes().to_vec()),
+        AssetId::contract(chain, contract.bytes().to_vec()),
         Amount::new(raw_val, decimals),
-        BlockRef::new(ChainId::ETH, block_number, block_hash),
+        BlockRef::new(chain, block_number, block_hash),
         timestamp,
         TransferKind::Token {
             contract,
@@ -1466,14 +1480,14 @@ fn parse_hash32(s: &str) -> anyhow::Result<[u8; 32]> {
         .map_err(|v: Vec<u8>| anyhow!("expected 32 bytes, got {}", v.len()))
 }
 
-fn parse_eth_address(s: &str) -> anyhow::Result<Address> {
+fn parse_eth_address(chain: ChainId, s: &str) -> anyhow::Result<Address> {
     use anyhow::Context;
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).context("hex decode eth address")?;
     if bytes.len() != 20 {
         anyhow::bail!("eth address expected 20 bytes, got {}", bytes.len());
     }
-    Ok(Address::new(ChainId::ETH, bytes))
+    Ok(Address::new(chain, bytes))
 }
 
 #[cfg(test)]
