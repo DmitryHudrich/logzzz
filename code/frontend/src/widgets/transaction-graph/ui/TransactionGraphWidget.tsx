@@ -3,6 +3,7 @@ import { SigmaGraphAdapter, type GraphData, type GraphLayoutMode } from '@/share
 type TransactionGraphWidgetProps = {
   graph: GraphData
   layout: GraphLayoutMode
+  rootNodeIds?: ReadonlySet<string> | null
   selectedNodeId: string
   visibleNodeIds?: ReadonlySet<string> | null
   visibleEdgeIds?: ReadonlySet<string> | null
@@ -13,6 +14,7 @@ type TransactionGraphWidgetProps = {
 export const TransactionGraphWidget = ({
   graph,
   layout,
+  rootNodeIds,
   selectedNodeId,
   visibleNodeIds,
   visibleEdgeIds,
@@ -23,6 +25,7 @@ export const TransactionGraphWidget = ({
     <SigmaGraphAdapter
       graph={graph}
       layout={layout}
+      rootNodeIds={rootNodeIds}
       selectedNodeId={selectedNodeId}
       visibleNodeIds={visibleNodeIds}
       visibleEdgeIds={visibleEdgeIds}

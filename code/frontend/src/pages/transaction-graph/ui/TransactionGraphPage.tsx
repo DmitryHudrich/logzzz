@@ -1,13 +1,12 @@
-import { lazy, Suspense, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { AnimatePresence } from 'framer-motion'
-import { AlertCircle, Loader2 } from 'lucide-react'
+import { AlertCircle, Eye, EyeOff, Loader2, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
 
 import {
   emptyTransactionGraphPage,
   filterGraphData,
   getTransactionNodeDetails,
-  mockTransactionGraphPage,
   transactionGraphPageToGraphData,
   useFetchTransactionGraphMutation,
   useIngestJobStatusQuery,
@@ -18,20 +17,20 @@ import {
 } from '@/entities/transaction'
 import { TransactionGraphControls } from '@/features/transaction-graph-controls'
 import { TransactionGraphFlowForm } from '@/features/transaction-graph-flow'
-import type { GraphFlowFormValues } from '@/features/transaction-graph-flow/model/form-schema'
-import { TransactionGraphSourceToggle, type GraphSourceMode } from '@/features/transaction-graph-source'
+import { graphFlowFormToPayload, type GraphFlowFormValues } from '@/features/transaction-graph-flow/model/form-schema'
 import { TransactionNodeDetailsDrawer } from '@/features/transaction-node-details'
 import { getErrorMessage } from '@/shared/api'
 import { type GraphLayoutMode } from '@/shared/graph'
+import { cn } from '@/shared/lib/cn'
 import { useDebouncedValue } from '@/shared/lib/use-debounced-value'
 import { Alert, AlertDescription, AlertTitle } from '@/shared/ui/alert'
+import { Button } from '@/shared/ui/button'
 import { FadeIn } from '@/shared/ui/motion'
+import { Input } from '@/shared/ui/input'
+import { Label } from '@/shared/ui/label'
 import { ScrollArea } from '@/shared/ui/scroll-area'
-import { Separator } from '@/shared/ui/separator'
 import { Skeleton } from '@/shared/ui/skeleton'
-import { Tabs, TabsList, TabsTrigger } from '@/shared/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/shared/ui/tooltip'
-import { cn } from '@/shared/lib/cn'
 import { TransactionGraphLegend } from '@/widgets/transaction-graph/ui/TransactionGraphLegend'
 
 const TransactionGraphWidget = lazy(async () => {
@@ -42,8 +41,23 @@ const TransactionGraphWidget = lazy(async () => {
 const defaultFormValues: GraphFlowFormValues = {
   address: '',
   fromBlock: '',
-  maxDepth: '3',
+  toBlock: '',
+  maxDepth: '2',
   maxNodes: '500',
+}
+
+type GraphSource = {
+  id: string
+  rootAddress: string
+  payload: FetchGraphPayload
+  graphPage: TransactionGraphPageData
+  enabled: boolean
+  isLoading: boolean
+}
+
+type SourceSettingsDraft = {
+  maxDepth: string
+  maxNodes: string
 }
 
 export const TransactionGraphPage = () => {
@@ -51,28 +65,62 @@ export const TransactionGraphPage = () => {
   const [selectedNodeId, setSelectedNodeId] = useState('')
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
-  const [sourceMode, setSourceMode] = useState<GraphSourceMode>('mock')
-  const [backendGraph, setBackendGraph] = useState<TransactionGraphPageData | null>(null)
+  const [graphSources, setGraphSources] = useState<GraphSource[]>([])
+  const [activeSourceId, setActiveSourceId] = useState<string | null>(null)
+  const [mainFormPayload, setMainFormPayload] = useState<FetchGraphPayload>(() => graphFlowFormToPayload(defaultFormValues))
+  const [sourceSettingsDraft, setSourceSettingsDraft] = useState<SourceSettingsDraft | null>(null)
   const [ingestJobId, setIngestJobId] = useState<string | null>(null)
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [isLoadingGraph, setIsLoadingGraph] = useState(false)
-  const [mobileTab, setMobileTab] = useState('graph')
+  const [loadingSourceId, setLoadingSourceId] = useState<string | null>(null)
+  const [selectedBlockRange, setSelectedBlockRange] = useState<{ from: number; to: number } | null>(null)
+  const [rebuildMode, setRebuildMode] = useState<'fetch' | 'draw'>('fetch')
 
   const debouncedQuery = useDebouncedValue(query, 200)
   const ingestMutation = useIngestWalletMutation()
   const drawGraphMutation = useFetchTransactionGraphMutation()
   const jobStatusQuery = useIngestJobStatusQuery(ingestJobId)
 
-  const graphPage =
-    sourceMode === 'mock' ? mockTransactionGraphPage : (backendGraph ?? emptyTransactionGraphPage)
-  const hasBackendData = backendGraph !== null
-  const showBackendEmptyState = sourceMode === 'backend' && !hasBackendData && !isLoadingGraph
+  const activeSource = useMemo(
+    () => graphSources.find((source) => source.id === activeSourceId) ?? null,
+    [activeSourceId, graphSources],
+  )
+  const enabledSources = useMemo(() => graphSources.filter((source) => source.enabled), [graphSources])
+  const enabledSourceKey = useMemo(
+    () => enabledSources.map((source) => source.id).sort().join('|'),
+    [enabledSources],
+  )
+  const graphPage = useMemo(
+    () => mergeTransactionGraphPages(enabledSources.map((source) => source.graphPage)),
+    [enabledSources],
+  )
+  const blockRange = useMemo(() => getBlockRangeFromEdges(graphPage.edges), [graphPage.edges])
 
-  const baseGraph = useMemo(() => transactionGraphPageToGraphData(graphPage), [graphPage])
+  useEffect(() => {
+    if (!blockRange) {
+      setSelectedBlockRange(null)
+      return
+    }
+
+    setSelectedBlockRange({ from: blockRange.from, to: blockRange.to })
+  }, [blockRange?.from, blockRange?.to, enabledSourceKey])
+
+  const blockFilteredGraphPage = useMemo(
+    () => filterGraphPageByBlockRange(graphPage, selectedBlockRange),
+    [graphPage, selectedBlockRange],
+  )
+  const hasBackendData = blockFilteredGraphPage.nodes.length > 0
+  const showBackendEmptyState = !hasBackendData && !isLoadingGraph
+
+  const baseGraph = useMemo(() => transactionGraphPageToGraphData(blockFilteredGraphPage), [blockFilteredGraphPage])
+  const rootNodeIds = useMemo(
+    () => new Set(enabledSources.map((source) => source.rootAddress)),
+    [enabledSources],
+  )
 
   const filteredGraph = useMemo(
-    () => filterGraphData(baseGraph, graphPage, debouncedQuery),
-    [baseGraph, debouncedQuery, graphPage],
+    () => filterGraphData(baseGraph, blockFilteredGraphPage, debouncedQuery),
+    [baseGraph, blockFilteredGraphPage, debouncedQuery],
   )
 
   const visibleNodeIds = useMemo(() => {
@@ -107,8 +155,8 @@ export const TransactionGraphPage = () => {
     if (!selectedNodeId) {
       return null
     }
-    return getTransactionNodeDetails(graphPage, baseGraph, selectedNodeId)
-  }, [baseGraph, graphPage, selectedNodeId])
+    return getTransactionNodeDetails(blockFilteredGraphPage, baseGraph, selectedNodeId)
+  }, [baseGraph, blockFilteredGraphPage, selectedNodeId])
 
   const ingestStatus = jobStatusQuery.data?.status.toLowerCase() ?? null
   const ingestProgress = useMemo(() => {
@@ -124,29 +172,142 @@ export const TransactionGraphPage = () => {
     return null
   }, [ingestStatus])
 
-  const onSourceModeChange = (mode: GraphSourceMode) => {
-    setSourceMode(mode)
+  useEffect(() => {
+    if (!selectedNodeId || baseGraph.nodes.some((node) => node.id === selectedNodeId)) {
+      return
+    }
     setSelectedNodeId('')
+  }, [baseGraph.nodes, selectedNodeId])
 
-    if (mode === 'mock') {
-      setStatusMessage(null)
+  useEffect(() => {
+    if (!hoveredNodeId || baseGraph.nodes.some((node) => node.id === hoveredNodeId)) {
       return
     }
+    setHoveredNodeId(null)
+  }, [baseGraph.nodes, hoveredNodeId])
 
-    if (!backendGraph) {
-      setStatusMessage(null)
+  useEffect(() => {
+    if (!activeSource) {
+      setSourceSettingsDraft(null)
       return
     }
+    setSourceSettingsDraft(payloadToSourceDraft(activeSource.payload))
+    setRebuildMode('fetch')
+  }, [activeSource])
 
-    setStatusMessage(`Graph loaded: ${backendGraph.total_nodes} nodes, ${backendGraph.total_edges} edges.`)
+  const upsertGraphSource = ({
+    page,
+    payload,
+    sourceId,
+  }: {
+    page: TransactionGraphPageData
+    payload: FetchGraphPayload
+    sourceId: string
+  }) => {
+    const normalizedAddress = normalizeAddress(payload.address)
+
+    setGraphSources((previous) => {
+      const sourceIndex = previous.findIndex((source) => source.id === sourceId)
+      if (sourceIndex < 0) {
+        return [
+          ...previous,
+          {
+            id: sourceId,
+            rootAddress: normalizedAddress,
+            payload: { ...payload, address: normalizedAddress },
+            graphPage: page,
+            enabled: true,
+            isLoading: false,
+          },
+        ]
+      }
+
+      return previous.map((source) =>
+        source.id === sourceId
+          ? {
+              ...source,
+              rootAddress: normalizedAddress,
+              payload: { ...payload, address: normalizedAddress },
+              graphPage: page,
+              enabled: true,
+              isLoading: false,
+            }
+          : source,
+      )
+    })
+
+    setActiveSourceId(sourceId)
+    setSelectedNodeId('')
+    setStatusMessage(`Source loaded: ${page.total_nodes} nodes, ${page.total_edges} edges.`)
+    toast.success(`Source loaded: ${page.total_nodes} nodes, ${page.total_edges} edges`)
   }
 
-  const applyLoadedGraph = (page: TransactionGraphPageData) => {
-    setBackendGraph(page)
-    setSourceMode('backend')
-    setSelectedNodeId('')
-    setStatusMessage(`Graph loaded: ${page.total_nodes} nodes, ${page.total_edges} edges.`)
-    toast.success(`Graph loaded: ${page.total_nodes} nodes, ${page.total_edges} edges`)
+  const loadGraphSource = async ({
+    payload,
+    withIngest,
+    sourceId,
+  }: {
+    payload: FetchGraphPayload
+    withIngest: boolean
+    sourceId?: string
+  }) => {
+    const normalizedPayload = { ...payload, address: normalizeAddress(payload.address) }
+    const effectiveSourceId = sourceId ?? createSourceId(normalizedPayload.address)
+    setIsLoadingGraph(true)
+    setLoadingSourceId(effectiveSourceId)
+    setActiveSourceId(effectiveSourceId)
+    setGraphSources((previous) => {
+      const existingIndex = previous.findIndex((source) => source.id === effectiveSourceId)
+      if (existingIndex < 0) {
+        return [
+          ...previous,
+          {
+            id: effectiveSourceId,
+            rootAddress: normalizeAddress(normalizedPayload.address),
+            payload: normalizedPayload,
+            graphPage: emptyTransactionGraphPage,
+            enabled: true,
+            isLoading: true,
+          },
+        ]
+      }
+      return previous.map((source) =>
+        source.id === effectiveSourceId
+          ? {
+              ...source,
+              payload: normalizedPayload,
+              enabled: true,
+              isLoading: true,
+            }
+          : source,
+      )
+    })
+    setStatusMessage(withIngest ? 'Starting ingest job...' : 'Loading graph from backend...')
+
+    try {
+      if (withIngest) {
+        const ingestResult = await ingestMutation.mutateAsync(normalizedPayload)
+        setIngestJobId(ingestResult.job_id)
+        setStatusMessage(`Ingest job accepted: ${ingestResult.job_id}. Waiting for completion...`)
+
+        await waitForIngestJob(ingestResult.job_id)
+        setStatusMessage('Loading graph from backend...')
+      }
+
+      const page = await drawGraphMutation.mutateAsync(normalizedPayload)
+      upsertGraphSource({ page, payload: normalizedPayload, sourceId: effectiveSourceId })
+    } catch (error) {
+      setGraphSources((previous) =>
+        previous
+          .map((source) => (source.id === effectiveSourceId ? { ...source, isLoading: false } : source))
+          .filter((source) => !(source.id === effectiveSourceId && !sourceId && source.graphPage.nodes.length === 0)),
+      )
+      setStatusMessage(null)
+      toast.error(getErrorMessage(error, 'Failed to load graph source.'))
+    } finally {
+      setIsLoadingGraph(false)
+      setLoadingSourceId(null)
+    }
   }
 
   const onFetchOnly = async (payload: FetchGraphPayload) => {
@@ -162,35 +323,57 @@ export const TransactionGraphPage = () => {
   }
 
   const onLoadGraph = async (payload: FetchGraphPayload) => {
-    setIsLoadingGraph(true)
-    setStatusMessage('Starting ingest job...')
-
-    try {
-      const result = await ingestMutation.mutateAsync(payload)
-      setIngestJobId(result.job_id)
-      setStatusMessage(`Ingest job accepted: ${result.job_id}. Waiting for completion...`)
-
-      await waitForIngestJob(result.job_id)
-      setStatusMessage('Loading graph from backend...')
-
-      const page = await drawGraphMutation.mutateAsync(payload)
-      applyLoadedGraph(page)
-    } catch (error) {
-      setStatusMessage(null)
-      toast.error(getErrorMessage(error, 'Failed to load graph.'))
-    } finally {
-      setIsLoadingGraph(false)
-    }
+    await loadGraphSource({ payload, withIngest: true })
   }
 
   const onDrawGraphOnly = async (payload: FetchGraphPayload) => {
-    try {
-      const page = await drawGraphMutation.mutateAsync(payload)
-      applyLoadedGraph(page)
-    } catch (error) {
-      setStatusMessage(null)
-      toast.error(getErrorMessage(error, 'Failed to load graph.'))
+    await loadGraphSource({ payload, withIngest: false })
+  }
+
+  const onAddOriginFromSelectedNode = async ({
+    maxDepth,
+    maxNodes,
+    mode,
+  }: {
+    maxDepth: number
+    maxNodes: number
+    mode: 'fetch' | 'draw'
+  }) => {
+    if (!selectedNodeId) {
+      return
     }
+    await loadGraphSource({
+      payload: {
+        ...mainFormPayload,
+        address: selectedNodeId,
+        max_depth: maxDepth,
+        max_nodes: maxNodes,
+      },
+      withIngest: mode === 'fetch',
+    })
+  }
+
+  const onApplyActiveSourceSettings = async () => {
+    if (!activeSource || !sourceSettingsDraft) {
+      return
+    }
+    await loadGraphSource({
+      payload: {
+        address: activeSource.rootAddress,
+        from_block: mainFormPayload.from_block,
+        to_block: mainFormPayload.to_block,
+        max_depth: parseNumberWithDefault(sourceSettingsDraft.maxDepth, 2),
+        max_nodes: parseNumberWithDefault(sourceSettingsDraft.maxNodes, 500),
+      },
+      withIngest: rebuildMode === 'fetch',
+      sourceId: activeSource.id,
+    })
+  }
+
+  const onToggleSourceVisibility = (sourceId: string) => {
+    setGraphSources((previous) =>
+      previous.map((source) => (source.id === sourceId ? { ...source, enabled: !source.enabled } : source)),
+    )
   }
 
   const jobStatusMessage = useMemo(() => {
@@ -209,15 +392,17 @@ export const TransactionGraphPage = () => {
     return `Ingest job ${ingestJobId}: ${jobStatusQuery.data.status}`
   }, [ingestJobId, ingestStatus, isLoadingGraph, jobStatusQuery.data])
 
-  const isBackendMode = sourceMode === 'backend'
-  const showGraphLoadingOverlay = isBackendMode && isLoadingGraph
+  const hasLoadedSources = useMemo(
+    () => graphSources.some((source) => source.graphPage.nodes.length > 0),
+    [graphSources],
+  )
+  const showGraphLoadingOverlay = isLoadingGraph && !hasLoadedSources
 
-  const resolvedStatusMessage = isBackendMode ? (jobStatusMessage ?? statusMessage) : null
-  const resolvedErrorMessage = isBackendMode
-    ? drawGraphMutation.error || ingestMutation.error
+  const resolvedStatusMessage = jobStatusMessage ?? statusMessage
+  const resolvedErrorMessage =
+    drawGraphMutation.error || ingestMutation.error
       ? getErrorMessage(drawGraphMutation.error ?? ingestMutation.error, 'Request failed.')
       : null
-    : null
 
   const sidebar = (
     <div className='flex h-full flex-col gap-4'>
@@ -226,23 +411,21 @@ export const TransactionGraphPage = () => {
         <p className='text-xs text-muted-foreground'>Transaction graph explorer</p>
       </div>
 
-      <TransactionGraphSourceToggle value={sourceMode} onChange={onSourceModeChange} />
-
-      <Separator />
-
       <TransactionGraphFlowForm
         defaultValues={defaultFormValues}
         onLoadGraph={onLoadGraph}
         onFetchOnly={onFetchOnly}
         onDrawGraph={onDrawGraphOnly}
-        isLoading={isBackendMode && isLoadingGraph}
-        isFetchingOnly={isBackendMode && ingestMutation.isPending && !isLoadingGraph}
-        isDrawingGraph={isBackendMode && drawGraphMutation.isPending}
-        ingestJobId={isBackendMode ? ingestJobId : null}
-        ingestProgress={isBackendMode ? ingestProgress : null}
-        ingestStatus={isBackendMode ? ingestStatus : null}
+        isLoading={isLoadingGraph}
+        isFetchingOnly={ingestMutation.isPending && !isLoadingGraph}
+        isDrawingGraph={drawGraphMutation.isPending}
+        ingestJobId={ingestJobId}
+        ingestProgress={ingestProgress}
+        ingestStatus={ingestStatus}
         statusMessage={resolvedStatusMessage}
         errorMessage={resolvedErrorMessage}
+        onSettingsChange={setMainFormPayload}
+        hideAddressInput={graphSources.length > 0}
       />
 
       <TransactionGraphControls
@@ -253,12 +436,127 @@ export const TransactionGraphPage = () => {
         nodeCount={filteredGraph.nodes.length}
         edgeCount={filteredGraph.edges.length}
         selectedNodeLabel={selectedNodeLabel}
+        blockRange={blockRange}
+        selectedBlockRange={selectedBlockRange}
+        onBlockRangeChange={setSelectedBlockRange}
       />
     </div>
   )
 
   const graphSection = (
     <section className='relative flex min-h-0 flex-1 flex-col p-3 lg:h-full'>
+      {graphSources.length > 0 ? (
+        <div className='mb-3 rounded-xl border border-border bg-card/60 p-2'>
+          <div className='flex flex-wrap items-center justify-between gap-2'>
+            <div className='flex min-w-0 flex-1 items-center gap-1 overflow-x-auto'>
+              {graphSources.map((source) => {
+                const isActive = source.id === activeSourceId
+                const isSourceLoading = source.isLoading || source.id === loadingSourceId
+                return (
+                  <div key={source.id} className='inline-flex items-center gap-1 rounded-md border border-border/60 bg-background/70 p-1'>
+                    <button
+                      type='button'
+                      onClick={() => setActiveSourceId(source.id)}
+                      className={cn(
+                        'inline-flex items-center gap-1 rounded px-2 py-1 text-xs leading-none whitespace-nowrap transition-colors',
+                        isActive ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent',
+                      )}
+                    >
+                      {isSourceLoading ? <Loader2 className='size-3 shrink-0 animate-spin' /> : null}
+                      {shortAddress(source.rootAddress)}
+                    </button>
+                    <Button
+                      type='button'
+                      size='sm'
+                      variant='ghost'
+                      className='h-6 px-1.5'
+                      onClick={() => onToggleSourceVisibility(source.id)}
+                      disabled={isSourceLoading}
+                    >
+                      {source.enabled ? <Eye className='size-3.5' /> : <EyeOff className='size-3.5' />}
+                    </Button>
+                  </div>
+                )
+              })}
+            </div>
+
+            <div />
+          </div>
+
+          {activeSource && sourceSettingsDraft ? (
+            <div className='mt-2 grid gap-2 border-t border-border/70 pt-2 sm:grid-cols-[repeat(2,minmax(0,1fr))_auto]'>
+              <div className='space-y-1'>
+                <Label htmlFor='source-max-depth' className='text-[11px] text-muted-foreground'>
+                  max_depth
+                </Label>
+                <Input
+                  id='source-max-depth'
+                  value={sourceSettingsDraft.maxDepth}
+                  inputMode='numeric'
+                  className='h-8 text-xs'
+                  onChange={(event) =>
+                    setSourceSettingsDraft((previous) =>
+                      previous ? { ...previous, maxDepth: event.target.value } : previous,
+                    )
+                  }
+                />
+              </div>
+              <div className='space-y-1'>
+                <Label htmlFor='source-max-nodes' className='text-[11px] text-muted-foreground'>
+                  max_nodes
+                </Label>
+                <Input
+                  id='source-max-nodes'
+                  value={sourceSettingsDraft.maxNodes}
+                  inputMode='numeric'
+                  className='h-8 text-xs'
+                  onChange={(event) =>
+                    setSourceSettingsDraft((previous) =>
+                      previous ? { ...previous, maxNodes: event.target.value } : previous,
+                    )
+                  }
+                />
+              </div>
+
+              <div className='flex flex-wrap items-end justify-end gap-1'>
+                <Button
+                  type='button'
+                  size='sm'
+                  variant={rebuildMode === 'fetch' ? 'secondary' : 'ghost'}
+                  className='h-8 px-3 text-xs'
+                  onClick={() => setRebuildMode('fetch')}
+                >
+                  Fetch
+                </Button>
+                <Button
+                  type='button'
+                  size='sm'
+                  variant={rebuildMode === 'draw' ? 'secondary' : 'ghost'}
+                  className='h-8 px-3 text-xs'
+                  onClick={() => setRebuildMode('draw')}
+                >
+                  Draw
+                </Button>
+                <Button
+                  type='button'
+                  size='sm'
+                  className='h-8 px-3 text-xs'
+                  onClick={() => void onApplyActiveSourceSettings()}
+                  disabled={isLoadingGraph || activeSource.isLoading}
+                >
+                  {activeSource.isLoading ? (
+                    <Loader2 className='size-3 animate-spin' />
+                  ) : (
+                    <RefreshCw className='size-3' />
+                  )}
+                  Rebuild
+                </Button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       <TransactionGraphLegend />
 
       {hoveredNodeLabel && !selectedNodeId ? (
@@ -284,6 +582,7 @@ export const TransactionGraphPage = () => {
           <TransactionGraphWidget
             graph={baseGraph}
             layout={layout}
+            rootNodeIds={rootNodeIds}
             selectedNodeId={selectedNodeId}
             visibleNodeIds={visibleNodeIds}
             visibleEdgeIds={visibleEdgeIds}
@@ -291,34 +590,35 @@ export const TransactionGraphPage = () => {
             onHoverNode={setHoveredNodeId}
           />
         </Suspense>
+
+        <AnimatePresence>
+          {showBackendEmptyState ? (
+            <FadeIn className='pointer-events-none absolute inset-0 flex items-center justify-center rounded-xl border border-dashed border-border bg-background/80 backdrop-blur-sm'>
+              <div className='max-w-sm px-6 text-center'>
+                <p className='text-sm font-medium'>No backend data loaded</p>
+                <p className='mt-2 text-xs text-muted-foreground'>
+                  Add a source with Load graph or Fetch graph, then extend from selected nodes to combine multiple
+                  sources.
+                </p>
+              </div>
+            </FadeIn>
+          ) : null}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {showGraphLoadingOverlay ? (
+            <FadeIn className='pointer-events-none absolute inset-0 flex items-center justify-center rounded-xl bg-background/65 backdrop-blur-sm'>
+              <div className='flex items-center gap-2 text-sm text-muted-foreground'>
+                <Loader2 className='size-4 animate-spin' />
+                Loading graph...
+              </div>
+            </FadeIn>
+          ) : null}
+        </AnimatePresence>
       </div>
 
       <AnimatePresence>
-        {showBackendEmptyState ? (
-          <FadeIn className='pointer-events-none absolute inset-3 flex items-center justify-center rounded-xl border border-dashed border-border bg-background/80 backdrop-blur-sm'>
-            <div className='max-w-sm px-6 text-center'>
-              <p className='text-sm font-medium'>No backend data loaded</p>
-              <p className='mt-2 text-xs text-muted-foreground'>
-                Use Load graph for ingest + fetch, or Fetch graph to render from data already in the backend.
-              </p>
-            </div>
-          </FadeIn>
-        ) : null}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {showGraphLoadingOverlay ? (
-          <FadeIn className='absolute inset-3 flex items-center justify-center rounded-xl bg-background/70 backdrop-blur-sm'>
-            <div className='flex items-center gap-2 text-sm text-muted-foreground'>
-              <Loader2 className='size-4 animate-spin' />
-              Loading graph...
-            </div>
-          </FadeIn>
-        ) : null}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {resolvedErrorMessage && sourceMode === 'backend' && !isLoadingGraph ? (
+        {resolvedErrorMessage && !isLoadingGraph ? (
           <FadeIn className='absolute inset-x-3 bottom-3'>
             <Alert variant='destructive'>
               <AlertCircle />
@@ -335,35 +635,18 @@ export const TransactionGraphPage = () => {
     <main className='flex h-screen w-full flex-col overflow-hidden bg-background text-foreground'>
       <div className='flex min-h-0 flex-1 flex-col lg:flex-row'>
         <div className='flex min-h-0 flex-1 flex-col lg:w-4/5'>
-          <Tabs value={mobileTab} onValueChange={setMobileTab} className='shrink-0 lg:hidden'>
-            <TabsList className='mx-3 mt-3 grid w-auto grid-cols-2'>
-              <TabsTrigger value='graph'>Graph</TabsTrigger>
-              <TabsTrigger value='controls'>Controls</TabsTrigger>
-            </TabsList>
-          </Tabs>
-
-          <div
-            className={cn(
-              'min-h-0 flex-1 flex-col',
-              mobileTab === 'controls' ? 'hidden lg:flex' : 'flex',
-            )}
-          >
+          <div className='min-h-0 flex-1 flex flex-col'>
             {graphSection}
           </div>
 
-          <div
-            className={cn(
-              'min-h-0 flex-1 overflow-hidden lg:hidden',
-              mobileTab === 'graph' ? 'hidden' : 'flex flex-col',
-            )}
-          >
+          <div className='min-h-0 max-h-[40vh] overflow-hidden border-t border-border lg:hidden'>
             <ScrollArea className='h-full'>
               <div className='p-4'>{sidebar}</div>
             </ScrollArea>
           </div>
         </div>
 
-        <aside className='hidden h-full w-1/5 min-w-[320px] border-l border-border bg-background lg:flex lg:flex-col'>
+        <aside className='hidden h-full w-full max-w-md shrink-0 border-l border-border bg-background lg:flex lg:flex-col'>
           <ScrollArea className='h-full'>
             <div className='p-4'>{sidebar}</div>
           </ScrollArea>
@@ -379,7 +662,126 @@ export const TransactionGraphPage = () => {
         }}
         details={selectedNodeDetails}
         isLoading={Boolean(selectedNodeId) && !selectedNodeDetails}
+        onAddOriginFromNode={onAddOriginFromSelectedNode}
+        defaultMaxDepth={mainFormPayload.max_depth ?? 2}
+        defaultMaxNodes={mainFormPayload.max_nodes ?? 500}
+        isAddingOrigin={isLoadingGraph}
       />
     </main>
   )
+}
+
+function normalizeAddress(address: string) {
+  return address.trim().toLowerCase()
+}
+
+function shortAddress(address: string) {
+  if (address.length <= 14) {
+    return address
+  }
+  return `${address.slice(0, 8)}…${address.slice(-4)}`
+}
+
+function createSourceId(rootAddress: string) {
+  return `${rootAddress}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+}
+
+function parseNumberWithDefault(value: string, fallback: number) {
+  const parsed = Number(value.trim())
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    return fallback
+  }
+  return parsed
+}
+
+function payloadToSourceDraft(payload: FetchGraphPayload): SourceSettingsDraft {
+  return {
+    maxDepth: payload.max_depth == null ? '2' : String(payload.max_depth),
+    maxNodes: payload.max_nodes == null ? '500' : String(payload.max_nodes),
+  }
+}
+
+function mergeTransactionGraphPages(pages: TransactionGraphPageData[]) {
+  if (pages.length === 0) {
+    return emptyTransactionGraphPage
+  }
+
+  const nodeSet = new Set<string>()
+  const edgeMap = new Map<string, TransactionGraphPageData['edges'][number]>()
+
+  for (const page of pages) {
+    for (const node of page.nodes) {
+      nodeSet.add(node)
+    }
+    for (const edge of page.edges) {
+      const edgeId = `${edge.tx_hash}:${edge.index}:${edge.from.toLowerCase()}:${edge.to.toLowerCase()}`
+      if (!edgeMap.has(edgeId)) {
+        edgeMap.set(edgeId, edge)
+      }
+    }
+  }
+
+  const nodes = Array.from(nodeSet)
+  const edges = Array.from(edgeMap.values())
+
+  return {
+    total_nodes: nodes.length,
+    total_edges: edges.length,
+    page: 0,
+    page_size: nodes.length,
+    total_pages: 1,
+    has_next: false,
+    nodes,
+    edges,
+  }
+}
+
+function getBlockRangeFromEdges(edges: TransactionGraphPageData['edges']) {
+  if (edges.length === 0) {
+    return null
+  }
+  let from = Number.POSITIVE_INFINITY
+  let to = Number.NEGATIVE_INFINITY
+  for (const edge of edges) {
+    if (edge.block < from) {
+      from = edge.block
+    }
+    if (edge.block > to) {
+      to = edge.block
+    }
+  }
+  if (!Number.isFinite(from) || !Number.isFinite(to)) {
+    return null
+  }
+  return { from, to }
+}
+
+function filterGraphPageByBlockRange(
+  page: TransactionGraphPageData,
+  range: { from: number; to: number } | null,
+): TransactionGraphPageData {
+  if (!range) {
+    return page
+  }
+
+  const edges = page.edges.filter((edge) => edge.block >= range.from && edge.block <= range.to)
+  const nodesSet = new Set<string>()
+  for (const edge of edges) {
+    nodesSet.add(edge.from)
+    nodesSet.add(edge.to)
+  }
+
+  const nodes = Array.from(nodesSet)
+
+  return {
+    ...page,
+    nodes,
+    edges,
+    total_nodes: nodes.length,
+    total_edges: edges.length,
+    page: 0,
+    total_pages: 1,
+    has_next: false,
+    page_size: nodes.length,
+  }
 }

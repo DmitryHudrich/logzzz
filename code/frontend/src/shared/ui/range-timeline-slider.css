@@ -1,0 +1,54 @@
+.range-timeline-slider .rc-slider {
+  height: 20px;
+  padding: 8px 0;
+}
+
+.range-timeline-slider .rc-slider-rail {
+  height: 6px;
+  border-radius: 9999px;
+  background-color: color-mix(in oklch, var(--muted) 70%, transparent);
+}
+
+.range-timeline-slider .rc-slider-track,
+.range-timeline-slider .rc-slider-tracks {
+  height: 6px;
+  border-radius: 9999px;
+  background-color: color-mix(in oklch, var(--primary) 75%, transparent);
+}
+
+.range-timeline-slider .rc-slider-track-draggable {
+  cursor: grab;
+}
+
+.range-timeline-slider .rc-slider-track-draggable:active {
+  cursor: grabbing;
+}
+
+.range-timeline-slider .rc-slider-handle {
+  width: 14px;
+  height: 14px;
+  margin-top: -4px;
+  border: 2px solid color-mix(in oklch, var(--primary) 80%, transparent);
+  background-color: var(--background);
+  opacity: 1;
+  box-shadow: none;
+}
+
+.range-timeline-slider .rc-slider-handle:hover {
+  border-color: var(--primary);
+}
+
+.range-timeline-slider .rc-slider-handle:active,
+.range-timeline-slider .rc-slider-handle-dragging {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--ring) 35%, transparent);
+}
+
+.range-timeline-slider .rc-slider-handle:focus-visible {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--ring) 45%, transparent);
+}
+
+.range-timeline-slider .rc-slider-disabled {
+  opacity: 0.5;
+}

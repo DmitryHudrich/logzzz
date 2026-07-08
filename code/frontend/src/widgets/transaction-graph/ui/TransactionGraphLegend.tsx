@@ -1,4 +1,5 @@
 const legendItems = [
+  { label: 'Origin', color: '#facc15' },
   { label: 'Wallet', color: '#7eb6ff' },
   { label: 'Exchange', color: '#c4b0f5' },
   { label: 'Risk', color: '#f09494' },

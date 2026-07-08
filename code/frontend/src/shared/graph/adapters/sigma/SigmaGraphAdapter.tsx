@@ -1,10 +1,9 @@
-import assignCircular from 'graphology-layout/circular'
-import forceAtlas2 from 'graphology-layout-forceatlas2'
 import Graph from 'graphology'
 import Sigma from 'sigma'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type { GraphAdapterProps, GraphData, GraphLayoutMode } from '@/shared/graph/contract/graph'
+import { applyGraphLayout } from '@/shared/graph/model/apply-graph-layout'
 
 const GRAPH_THEME = {
   canvas: '#09090b',
@@ -13,6 +12,7 @@ const GRAPH_THEME = {
   label: '#52525c',
   labelActive: '#a1a1aa',
   dimmedNode: '#27272a',
+  rootNode: '#f59e0b',
   groups: {
     wallet: '#7eb6ff',
     exchange: '#c4b0f5',
@@ -40,6 +40,7 @@ type NodePosition = { x: number; y: number }
 export const SigmaGraphAdapter = ({
   graph,
   layout,
+  rootNodeIds = null,
   selectedNodeId = '',
   visibleNodeIds = null,
   visibleEdgeIds = null,
@@ -50,6 +51,7 @@ export const SigmaGraphAdapter = ({
   const rendererRef = useRef<Sigma<SigmaNodeAttrs, SigmaEdgeAttrs> | null>(null)
   const graphRef = useRef<Graph<SigmaNodeAttrs, SigmaEdgeAttrs> | null>(null)
   const nodePositionsRef = useRef<Map<string, NodePosition>>(new Map())
+  const rootNodeIdsRef = useRef<ReadonlySet<string> | null>(rootNodeIds)
   const selectedNodeIdRef = useRef(selectedNodeId)
   const visibleNodeIdsRef = useRef(visibleNodeIds)
   const visibleEdgeIdsRef = useRef(visibleEdgeIds)
@@ -59,6 +61,7 @@ export const SigmaGraphAdapter = ({
   const graphSignatureRef = useRef('')
   const [canRender, setCanRender] = useState(false)
 
+  rootNodeIdsRef.current = rootNodeIds
   selectedNodeIdRef.current = selectedNodeId
   visibleNodeIdsRef.current = visibleNodeIds
   visibleEdgeIdsRef.current = visibleEdgeIds
@@ -82,8 +85,8 @@ export const SigmaGraphAdapter = ({
   }, [graphSignature])
 
   const preparedGraph = useMemo(
-    () => buildGraph(graph, layout, nodePositionsRef.current),
-    [graph, layout],
+    () => buildGraph(graph, layout, nodePositionsRef.current, rootNodeIds),
+    [graph, layout, rootNodeIds],
   )
 
   useEffect(() => {
@@ -143,8 +146,19 @@ export const SigmaGraphAdapter = ({
           return { ...data, hidden: true, label: '' }
         }
 
+        const isRoot = isRootAddress(node, rootNodeIdsRef.current)
         const activeNodeId = selectedNodeIdRef.current
         if (!activeNodeId) {
+          if (isRoot) {
+            return {
+              ...data,
+              color: GRAPH_THEME.rootNode,
+              size: data.size * 1.42,
+              label: data.label,
+              labelColor: GRAPH_THEME.labelActive,
+              zIndex: 2,
+            }
+          }
           return {
             ...data,
             labelColor: GRAPH_THEME.label,
@@ -154,13 +168,23 @@ export const SigmaGraphAdapter = ({
         if (node === activeNodeId) {
           return {
             ...data,
-            size: data.size * 1.15,
+            color: isRoot ? GRAPH_THEME.rootNode : data.color,
+            size: isRoot ? data.size * 1.55 : data.size * 1.15,
+            label: data.label,
             labelColor: GRAPH_THEME.labelActive,
+            zIndex: isRoot ? 2 : 1,
           }
         }
 
         const neighborSet = getNeighborhood(sigmaGraph, activeNodeId)
         if (neighborSet.has(node)) {
+          if (isRoot) {
+            return {
+              ...data,
+              color: GRAPH_THEME.rootNode,
+              size: data.size * 1.12,
+            }
+          }
           return data
         }
 
@@ -222,7 +246,7 @@ export const SigmaGraphAdapter = ({
 
   useEffect(() => {
     rendererRef.current?.refresh()
-  }, [selectedNodeId, visibleNodeIds, visibleEdgeIds])
+  }, [selectedNodeId, visibleNodeIds, visibleEdgeIds, rootNodeIds])
 
   return (
     <div className='relative h-full min-h-[360px] w-full'>
@@ -244,6 +268,7 @@ function buildGraph(
   graphData: GraphData,
   layout: GraphLayoutMode,
   savedPositions: Map<string, NodePosition>,
+  rootNodeIds: ReadonlySet<string> | null,
 ) {
   const graph = new Graph<SigmaNodeAttrs, SigmaEdgeAttrs>({ type: 'directed', multi: true, allowSelfLoops: false })
 
@@ -271,14 +296,7 @@ function buildGraph(
 
   const hasSavedLayout = graphData.nodes.some((node) => savedPositions.has(node.id))
   if (!hasSavedLayout) {
-    applyLayout(graph, layout)
-    compactGraphPositions(graph, 0.72)
-    if (layout === 'force') {
-      separateOverlappingNodes(graph, 5, 10)
-    } else {
-      // Keep concentric/flow shape and only lightly resolve direct collisions.
-      separateOverlappingNodes(graph, 0.1, 10)
-    }
+    applyGraphLayout(graph, layout, rootNodeIds)
   }
 
   graph.forEachNode((node, attributes) => {
@@ -294,31 +312,6 @@ function seededCoordinate(id: string, salt: number) {
     hash = (hash * 31 + id.charCodeAt(index)) >>> 0
   }
   return (hash % 1000) / 500 - 1
-}
-
-function compactGraphPositions(graph: Graph<SigmaNodeAttrs, SigmaEdgeAttrs>, factor: number) {
-  const nodes = graph.nodes()
-  if (nodes.length === 0) {
-    return
-  }
-
-  let centerX = 0
-  let centerY = 0
-
-  nodes.forEach((node) => {
-    centerX += graph.getNodeAttribute(node, 'x')
-    centerY += graph.getNodeAttribute(node, 'y')
-  })
-
-  centerX /= nodes.length
-  centerY /= nodes.length
-
-  nodes.forEach((node) => {
-    const x = graph.getNodeAttribute(node, 'x')
-    const y = graph.getNodeAttribute(node, 'y')
-    graph.setNodeAttribute(node, 'x', centerX + (x - centerX) * factor)
-    graph.setNodeAttribute(node, 'y', centerY + (y - centerY) * factor)
-  })
 }
 
 function bindNodeDragging(
@@ -399,82 +392,6 @@ function bindNodeDragging(
   }
 }
 
-function applyLayout(graph: Graph<SigmaNodeAttrs, SigmaEdgeAttrs>, layout: GraphLayoutMode) {
-  if (layout === 'concentric') {
-    assignCircular(graph, { scale: 0.55 })
-    return
-  }
-
-  if (layout === 'breadthfirst') {
-    assignBreadthFirst(graph)
-    return
-  }
-
-  if (graph.order > 1) {
-    const inferred = forceAtlas2.inferSettings(graph)
-    forceAtlas2.assign(graph, {
-      iterations: 220,
-      settings: {
-        ...inferred,
-        gravity: Math.max(inferred.gravity ?? 1, 4),
-        scalingRatio: Math.max(2, (inferred.scalingRatio ?? 10) * 0.35),
-        strongGravityMode: true,
-        slowDown: 2,
-        adjustSizes: true,
-      },
-    })
-  }
-}
-
-function assignBreadthFirst(graph: Graph<SigmaNodeAttrs, SigmaEdgeAttrs>) {
-  if (graph.order === 0) {
-    return
-  }
-
-  const nodes = graph.nodes()
-  const root = nodes.reduce((best: string, current: string) => {
-    return graph.degree(current) > graph.degree(best) ? current : best
-  }, nodes[0]!)
-
-  const depth = new Map<string, number>([[root, 0]])
-  const queue = [root]
-
-  while (queue.length > 0) {
-    const current = queue.shift()!
-    const nextDepth = (depth.get(current) ?? 0) + 1
-    graph.forEachOutboundNeighbor(current, (neighbor: string) => {
-      if (!depth.has(neighbor)) {
-        depth.set(neighbor, nextDepth)
-        queue.push(neighbor)
-      }
-    })
-    graph.forEachInboundNeighbor(current, (neighbor: string) => {
-      if (!depth.has(neighbor)) {
-        depth.set(neighbor, nextDepth)
-        queue.push(neighbor)
-      }
-    })
-  }
-
-  const layers = new Map<number, string[]>()
-  nodes.forEach((node: string) => {
-    const level = depth.get(node) ?? 0
-    const layer = layers.get(level) ?? []
-    layer.push(node)
-    layers.set(level, layer)
-  })
-
-  const maxWidth = Math.max(...Array.from(layers.values()).map((layer) => layer.length), 1)
-  for (const [level, layer] of layers.entries()) {
-    layer.forEach((node, index) => {
-      const x = maxWidth === 1 ? 0 : (index / (maxWidth - 1)) * 1.4 - 0.7
-      const y = level * 0.35
-      graph.setNodeAttribute(node, 'x', x)
-      graph.setNodeAttribute(node, 'y', y)
-    })
-  }
-}
-
 function colorByGroup(group?: string) {
   if (group === 'wallet') {
     return GRAPH_THEME.groups.wallet
@@ -496,72 +413,29 @@ function mapWeightToEdgeSize(weight: number) {
   return Math.max(0.35, Math.min(1.4, 0.3 + weight * 0.12))
 }
 
-function separateOverlappingNodes(graph: Graph<SigmaNodeAttrs, SigmaEdgeAttrs>, minDistance: number, iterations: number) {
-  const nodes = graph.nodes()
-  if (nodes.length < 2) {
-    return
-  }
-
-  for (let iteration = 0; iteration < iterations; iteration += 1) {
-    let adjusted = false
-
-    for (let index = 0; index < nodes.length; index += 1) {
-      const first = nodes[index]!
-      let x1 = graph.getNodeAttribute(first, 'x')
-      let y1 = graph.getNodeAttribute(first, 'y')
-
-      for (let compareIndex = index + 1; compareIndex < nodes.length; compareIndex += 1) {
-        const second = nodes[compareIndex]!
-        let x2 = graph.getNodeAttribute(second, 'x')
-        let y2 = graph.getNodeAttribute(second, 'y')
-        const size1 = graph.getNodeAttribute(first, 'size')
-        const size2 = graph.getNodeAttribute(second, 'size')
-
-        const dx = x2 - x1
-        const dy = y2 - y1
-        const distance = Math.hypot(dx, dy)
-        const requiredDistance = Math.max(minDistance, (size1 + size2) * 0.018)
-
-        if (distance >= requiredDistance) {
-          continue
-        }
-
-        const safeDistance = distance < 1e-4 ? 1e-4 : distance
-        const overlap = (requiredDistance - safeDistance) * 0.5
-        const shiftX = (dx / safeDistance) * overlap
-        const shiftY = (dy / safeDistance) * overlap
-
-        if (distance < 1e-4) {
-          const angle = ((index + 1) * (compareIndex + 3) * 0.61) % (Math.PI * 2)
-          x1 -= Math.cos(angle) * overlap
-          y1 -= Math.sin(angle) * overlap
-          x2 += Math.cos(angle) * overlap
-          y2 += Math.sin(angle) * overlap
-        } else {
-          x1 -= shiftX
-          y1 -= shiftY
-          x2 += shiftX
-          y2 += shiftY
-        }
-
-        graph.setNodeAttribute(first, 'x', x1)
-        graph.setNodeAttribute(first, 'y', y1)
-        graph.setNodeAttribute(second, 'x', x2)
-        graph.setNodeAttribute(second, 'y', y2)
-        adjusted = true
-      }
-    }
-
-    if (!adjusted) {
-      break
-    }
-  }
-}
-
 function getNeighborhood(graph: Graph<SigmaNodeAttrs, SigmaEdgeAttrs>, nodeId: string) {
   const neighbors = new Set<string>()
   graph.forEachNeighbor(nodeId, (neighbor: string) => {
     neighbors.add(neighbor)
   })
   return neighbors
+}
+
+function isSameAddress(left: string, right: string | null | undefined) {
+  if (!right) {
+    return false
+  }
+  return left.toLowerCase() === right.toLowerCase()
+}
+
+function isRootAddress(nodeId: string, rootNodeIds: ReadonlySet<string> | null | undefined) {
+  if (!rootNodeIds || rootNodeIds.size === 0) {
+    return false
+  }
+  for (const rootNodeId of rootNodeIds) {
+    if (isSameAddress(nodeId, rootNodeId)) {
+      return true
+    }
+  }
+  return false
 }

@@ -1,5 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod'
-import { ChevronDown, Download, Loader2, Network } from 'lucide-react'
+import { Download, Loader2, Network } from 'lucide-react'
+import { useEffect } from 'react'
 import { useForm } from 'react-hook-form'
 
 import {
@@ -10,7 +11,6 @@ import {
 import { Alert, AlertDescription, AlertTitle } from '@/shared/ui/alert'
 import { Button } from '@/shared/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/shared/ui/card'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/shared/ui/collapsible'
 import { Input } from '@/shared/ui/input'
 import { Label } from '@/shared/ui/label'
 import { Progress } from '@/shared/ui/progress'
@@ -29,6 +29,8 @@ type TransactionGraphFlowFormProps = {
   ingestStatus?: string | null
   statusMessage?: string | null
   errorMessage?: string | null
+  onSettingsChange?: (payload: ReturnType<typeof graphFlowFormToPayload>) => void
+  hideAddressInput?: boolean
 }
 
 export const TransactionGraphFlowForm = ({
@@ -44,6 +46,8 @@ export const TransactionGraphFlowForm = ({
   ingestStatus,
   statusMessage,
   errorMessage,
+  onSettingsChange,
+  hideAddressInput = false,
 }: TransactionGraphFlowFormProps) => {
   const form = useForm<GraphFlowFormValues>({
     resolver: zodResolver(graphFlowFormSchema),
@@ -68,64 +72,106 @@ export const TransactionGraphFlowForm = ({
 
   const showIngestProgress = ingestStatus === 'pending' || ingestStatus === 'running'
 
+  useEffect(() => {
+    if (!onSettingsChange) {
+      return
+    }
+
+    onSettingsChange(graphFlowFormToPayload(form.getValues()))
+    const subscription = form.watch((values) => {
+      onSettingsChange(graphFlowFormToPayload(values as GraphFlowFormValues))
+    })
+    return () => {
+      subscription.unsubscribe()
+    }
+  }, [form, onSettingsChange])
+
   return (
     <Card className='gap-4 py-4'>
       <CardHeader className='px-4 pb-0'>
-        <CardTitle className='text-base'>Wallet</CardTitle>
+        <CardTitle className='text-base'>Data ingestion</CardTitle>
         <CardDescription>Ingest data, fetch the graph, or run both in one step.</CardDescription>
       </CardHeader>
 
       <CardContent className='space-y-4 px-4'>
-        <div className='space-y-2'>
-          <div className='flex items-center gap-2'>
-            <Label htmlFor='address'>Wallet address</Label>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className='cursor-help text-xs text-muted-foreground'>(required)</span>
-              </TooltipTrigger>
-              <TooltipContent>Root address used to build the transaction graph.</TooltipContent>
-            </Tooltip>
+        {!hideAddressInput ? (
+          <div className='space-y-2'>
+            <div className='flex items-center gap-2'>
+              <Label htmlFor='address'>First root wallet address</Label>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className='cursor-help text-xs text-muted-foreground'>(required)</span>
+                </TooltipTrigger>
+                <TooltipContent>Root address used to build first origin of the transaction graph.</TooltipContent>
+              </Tooltip>
+            </div>
+            <Input id='address' placeholder='0x...' {...form.register('address')} />
+            {form.formState.errors.address ? (
+              <p className='text-xs text-destructive'>{form.formState.errors.address.message}</p>
+            ) : null}
           </div>
-          <Input id='address' placeholder='0x...' {...form.register('address')} />
-          {form.formState.errors.address ? (
-            <p className='text-xs text-destructive'>{form.formState.errors.address.message}</p>
-          ) : null}
+        ) : null}
+
+        <div className='grid grid-cols-2 gap-4'>
+          <div className='space-y-2'>
+            <div className='flex items-center gap-2'>
+              <Label htmlFor='fromBlock'>from_block</Label>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className='cursor-help text-xs text-muted-foreground'>?</span>
+                </TooltipTrigger>
+                <TooltipContent>Earliest block number to start scanning from.</TooltipContent>
+              </Tooltip>
+            </div>
+            <Input id='fromBlock' inputMode='numeric' placeholder='19000000' {...form.register('fromBlock')} />
+            {form.formState.errors.fromBlock ? (
+              <p className='text-xs text-destructive'>{form.formState.errors.fromBlock.message}</p>
+            ) : null}
+          </div>
+
+          <div className='space-y-2'>
+            <div className='flex items-center gap-2'>
+              <Label htmlFor='toBlock'>to_block</Label>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className='cursor-help text-xs text-muted-foreground'>?</span>
+                </TooltipTrigger>
+                <TooltipContent>Latest block number to include in the scan.</TooltipContent>
+              </Tooltip>
+            </div>
+            <Input id='toBlock' inputMode='numeric' placeholder='latest' {...form.register('toBlock')} />
+            {form.formState.errors.toBlock ? (
+              <p className='text-xs text-destructive'>{form.formState.errors.toBlock.message}</p>
+            ) : null}
+          </div>
         </div>
 
-        <div className='space-y-2'>
-          <div className='flex items-center gap-2'>
-            <Label htmlFor='fromBlock'>from_block</Label>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className='cursor-help text-xs text-muted-foreground'>(required)</span>
-              </TooltipTrigger>
-              <TooltipContent>Earliest block number to start scanning from.</TooltipContent>
-            </Tooltip>
-          </div>
-          <Input id='fromBlock' inputMode='numeric' placeholder='19000000' {...form.register('fromBlock')} />
-          {form.formState.errors.fromBlock ? (
-            <p className='text-xs text-destructive'>{form.formState.errors.fromBlock.message}</p>
-          ) : null}
-        </div>
-
-        <Collapsible>
-          <CollapsibleTrigger asChild>
-            <Button type='button' variant='ghost' size='sm' className='w-full justify-between px-0 hover:bg-transparent'>
-              Advanced settings
-              <ChevronDown className='size-4' />
-            </Button>
-          </CollapsibleTrigger>
-          <CollapsibleContent className='space-y-4 pt-3'>
-            <div className='space-y-2'>
+        <div className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
+          <div className='space-y-2'>
+            <div className='flex items-center gap-2'>
               <Label htmlFor='maxDepth'>max_depth</Label>
-              <Input id='maxDepth' inputMode='numeric' placeholder='3' {...form.register('maxDepth')} />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className='cursor-help text-xs text-muted-foreground'>?</span>
+                </TooltipTrigger>
+                <TooltipContent>Maximum traversal depth for graph expansion.</TooltipContent>
+              </Tooltip>
             </div>
-            <div className='space-y-2'>
+            <Input id='maxDepth' inputMode='numeric' placeholder='2' {...form.register('maxDepth')} />
+          </div>
+          <div className='space-y-2'>
+            <div className='flex items-center gap-2'>
               <Label htmlFor='maxNodes'>max_nodes</Label>
-              <Input id='maxNodes' inputMode='numeric' placeholder='500' {...form.register('maxNodes')} />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className='cursor-help text-xs text-muted-foreground'>?</span>
+                </TooltipTrigger>
+                <TooltipContent>Upper limit on nodes returned in the graph.</TooltipContent>
+              </Tooltip>
             </div>
-          </CollapsibleContent>
-        </Collapsible>
+            <Input id='maxNodes' inputMode='numeric' placeholder='500' {...form.register('maxNodes')} />
+          </div>
+        </div>
 
         <div className='flex flex-col gap-2'>
           <Button
@@ -134,7 +180,7 @@ export const TransactionGraphFlowForm = ({
             disabled={isLoading || isFetchingOnly || isDrawingGraph}
           >
             {isLoading ? <Loader2 className='animate-spin' /> : <Network />}
-            {isLoading ? 'Loading graph...' : 'Load graph'}
+            {isLoading ? 'Fetching graph...' : 'Fetch graph'}
           </Button>
 
           {onDrawGraph ? (
@@ -145,7 +191,7 @@ export const TransactionGraphFlowForm = ({
               disabled={isLoading || isFetchingOnly || isDrawingGraph}
             >
               {isDrawingGraph ? <Loader2 className='animate-spin' /> : <Network />}
-              {isDrawingGraph ? 'Fetching graph...' : 'Fetch graph'}
+              {isDrawingGraph ? 'Drawing graph...' : 'Draw graph'}
             </Button>
           ) : null}
 
@@ -156,7 +202,7 @@ export const TransactionGraphFlowForm = ({
             disabled={isLoading || isFetchingOnly || isDrawingGraph}
           >
             {isFetchingOnly ? <Loader2 className='animate-spin' /> : <Download />}
-            {isFetchingOnly ? 'Fetching...' : 'Fetch data only'}
+            {isFetchingOnly ? 'Ingesting data...' : 'Ingest data'}
           </Button>
         </div>
 

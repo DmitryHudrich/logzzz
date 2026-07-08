@@ -9,7 +9,10 @@ import { Badge } from '@/shared/ui/badge'
 import { Button } from '@/shared/ui/button'
 import { copyToClipboard } from '@/shared/lib/copy-to-clipboard'
 import { cn } from '@/shared/lib/cn'
+import { Input } from '@/shared/ui/input'
+import { Label } from '@/shared/ui/label'
 import { motionContainer, motionItem } from '@/shared/ui/motion'
+import { RangeTimelineSlider } from '@/shared/ui/range-timeline-slider'
 import { ScrollArea } from '@/shared/ui/scroll-area'
 import { Separator } from '@/shared/ui/separator'
 import { Skeleton } from '@/shared/ui/skeleton'
@@ -20,6 +23,14 @@ type TransactionNodeDetailsDrawerProps = {
   onOpenChange: (open: boolean) => void
   details: TransactionNodeDetails | null
   isLoading?: boolean
+  onAddOriginFromNode?: (params: {
+    maxDepth: number
+    maxNodes: number
+    mode: 'fetch' | 'draw'
+  }) => Promise<void> | void
+  defaultMaxDepth?: number
+  defaultMaxNodes?: number
+  isAddingOrigin?: boolean
 }
 
 const groupLabels: Record<string, string> = {
@@ -33,6 +44,10 @@ export const TransactionNodeDetailsDrawer = ({
   onOpenChange,
   details,
   isLoading = false,
+  onAddOriginFromNode,
+  defaultMaxDepth = 2,
+  defaultMaxNodes = 500,
+  isAddingOrigin = false,
 }: TransactionNodeDetailsDrawerProps) => {
   useEffect(() => {
     if (!open) {
@@ -69,7 +84,13 @@ export const TransactionNodeDetailsDrawer = ({
         {isLoading ? (
           <PanelLoadingState />
         ) : details ? (
-          <PanelDetailsContent details={details} />
+          <PanelDetailsContent
+            details={details}
+            onAddOriginFromNode={onAddOriginFromNode}
+            defaultMaxDepth={defaultMaxDepth}
+            defaultMaxNodes={defaultMaxNodes}
+            isAddingOrigin={isAddingOrigin}
+          />
         ) : (
           <div className='space-y-1.5 p-4'>
             <h2 className='font-semibold text-foreground'>Node details</h2>
@@ -98,12 +119,37 @@ function PanelLoadingState() {
   )
 }
 
-function PanelDetailsContent({ details }: { details: TransactionNodeDetails }) {
+function PanelDetailsContent({
+  details,
+  onAddOriginFromNode,
+  defaultMaxDepth,
+  defaultMaxNodes,
+  isAddingOrigin,
+}: {
+  details: TransactionNodeDetails
+  onAddOriginFromNode?: (params: {
+    maxDepth: number
+    maxNodes: number
+    mode: 'fetch' | 'draw'
+  }) => Promise<void> | void
+  defaultMaxDepth: number
+  defaultMaxNodes: number
+  isAddingOrigin: boolean
+}) {
   const [activeTab, setActiveTab] = useState<'transactions' | 'analytics'>('transactions')
+  const [extendMaxDepth, setExtendMaxDepth] = useState(String(defaultMaxDepth))
+  const [extendMaxNodes, setExtendMaxNodes] = useState(String(defaultMaxNodes))
+  const [originMode, setOriginMode] = useState<'fetch' | 'draw'>('fetch')
 
   useEffect(() => {
     setActiveTab('transactions')
   }, [details.address])
+
+  useEffect(() => {
+    setExtendMaxDepth(String(defaultMaxDepth))
+    setExtendMaxNodes(String(defaultMaxNodes))
+    setOriginMode('fetch')
+  }, [details.address, defaultMaxDepth, defaultMaxNodes])
 
   const tokenVolumes = useMemo(() => buildTokenVolumes(details.incoming, details.outgoing), [details.incoming, details.outgoing])
   const timelinePoints = useMemo(() => buildTimelinePoints(details.incoming, details.outgoing), [details.incoming, details.outgoing])
@@ -123,6 +169,71 @@ function PanelDetailsContent({ details }: { details: TransactionNodeDetails }) {
           </div>
           <CopyButton value={details.address} label='address' />
         </div>
+
+        {onAddOriginFromNode ? (
+          <div className='grid grid-cols-[repeat(2,minmax(0,1fr))_auto] items-end gap-2 rounded-md border border-border/70 bg-card/40 p-2'>
+            <div className='space-y-1'>
+              <Label htmlFor='drawer-max-depth' className='text-[11px] text-muted-foreground'>
+                max_depth
+              </Label>
+              <Input
+                id='drawer-max-depth'
+                inputMode='numeric'
+                size={16}
+                value={extendMaxDepth}
+                className='h-8 text-xs'
+                onChange={(event) => setExtendMaxDepth(event.target.value)}
+              />
+            </div>
+            <div className='space-y-1'>
+              <Label htmlFor='drawer-max-nodes' className='text-[11px] text-muted-foreground'>
+                max_nodes
+              </Label>
+              <Input
+                id='drawer-max-nodes'
+                inputMode='numeric'
+                value={extendMaxNodes}
+                className='h-8 text-xs'
+                onChange={(event) => setExtendMaxNodes(event.target.value)}
+              />
+            </div>
+            <div className='flex flex-wrap items-center justify-end gap-1'>
+              <Button
+                type='button'
+                size='sm'
+                variant={originMode === 'fetch' ? 'secondary' : 'ghost'}
+                className='h-8 px-3 text-xs'
+                onClick={() => setOriginMode('fetch')}
+              >
+                Fetch
+              </Button>
+              <Button
+                type='button'
+                size='sm'
+                variant={originMode === 'draw' ? 'secondary' : 'ghost'}
+                className='h-8 px-3 text-xs'
+                onClick={() => setOriginMode('draw')}
+              >
+                Draw
+              </Button>
+              <Button
+                type='button'
+                className='h-8 px-3 text-xs'
+                disabled={isAddingOrigin}
+                onClick={() =>
+                  void onAddOriginFromNode({
+                    maxDepth: toPositiveInt(extendMaxDepth, defaultMaxDepth),
+                    maxNodes: toPositiveInt(extendMaxNodes, defaultMaxNodes),
+                    mode: originMode,
+                  })
+                }
+              >
+                {isAddingOrigin ? <Loader2 className='size-3 animate-spin' /> : null}
+                Add as origin
+              </Button>
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <div className='flex min-h-0 flex-1 flex-col'>
@@ -391,35 +502,15 @@ function FlowTimelinePlot({ points }: { points: TimelinePoint[] }) {
               {safeRangeStart + 1}-{safeRangeEnd + 1} / {points.length}
             </span>
           </div>
-          <input
-            type='range'
+          <RangeTimelineSlider
             min={0}
             max={maxIndex}
-            value={safeRangeStart}
-            onChange={(event) => {
-              const next = Number(event.target.value)
-              const clamped = Math.min(next, safeRangeEnd)
-              setRangeStart(clamped)
-              if (safeRangeEnd - clamped < 1) {
-                setRangeEnd(Math.min(maxIndex, clamped + 1))
-              }
+            minSpan={1}
+            value={{ from: safeRangeStart, to: safeRangeEnd }}
+            onChange={({ from, to }) => {
+              setRangeStart(from)
+              setRangeEnd(to)
             }}
-            className='w-full accent-primary'
-          />
-          <input
-            type='range'
-            min={0}
-            max={maxIndex}
-            value={safeRangeEnd}
-            onChange={(event) => {
-              const next = Number(event.target.value)
-              const clamped = Math.max(next, safeRangeStart)
-              setRangeEnd(clamped)
-              if (clamped - safeRangeStart < 1) {
-                setRangeStart(Math.max(0, clamped - 1))
-              }
-            }}
-            className='w-full accent-primary'
           />
           <div className='flex justify-end'>
             <Button
@@ -621,6 +712,14 @@ function parseFormattedValue(value: string) {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) {
     return 0
+  }
+  return parsed
+}
+
+function toPositiveInt(value: string, fallback: number) {
+  const parsed = Number(value.trim())
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return fallback
   }
   return parsed
 }

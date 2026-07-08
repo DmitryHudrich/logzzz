@@ -1,5 +1,4 @@
 export type { TransactionEdge, TransactionGraphPage } from '@/entities/transaction/model/transaction'
-export { mockTransactionGraphPage } from '@/entities/transaction/model/mock-transaction-graph-page'
 export { emptyTransactionGraphPage } from '@/entities/transaction/model/empty-transaction-graph-page'
 export { transactionGraphPageToGraphData } from '@/entities/transaction/lib/to-graph'
 export { filterGraphData } from '@/entities/transaction/lib/filter-graph'
