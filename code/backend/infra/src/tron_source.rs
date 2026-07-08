@@ -89,6 +89,13 @@ struct PageKey {
     endpoint: Endpoint,
     address_b58: String,
     fingerprint: Option<String>,
+    /// The `[min_ts, max_ts]` window this page was fetched under (ms since
+    /// epoch). Included in the key because the same `fingerprint` cursor
+    /// value can mean different things under different windows — e.g. the
+    /// first page (`fingerprint = None`) of a full-history fetch is not the
+    /// same response as the first page of a narrow hot-tail refetch.
+    min_ts: Option<u64>,
+    max_ts: Option<u64>,
 }
 
 type PageValue = Arc<(Vec<Transfer>, Option<String>)>;
@@ -96,7 +103,26 @@ type PageValue = Arc<(Vec<Transfer>, Option<String>)>;
 /// Reads only solidified (`only_confirmed=true`) data — see
 /// `side_api/tron/endpoints.rs`. TRON DPoS finality means solidified blocks
 /// never reorg, so the hot-tail problem (relevant for ETH/Moralis) doesn't
-/// apply here and pages can be cached aggressively with a single TTL.
+/// apply here and pages can be cached aggressively with a single TTL, and
+/// once fetched a page never needs invalidating regardless of which window
+/// it was fetched under.
+///
+/// ## Incremental fetch and the "height" convention
+///
+/// TronGrid's REST API has no concept of filtering by block height — the
+/// account-transaction endpoints only support `min_timestamp`/`max_timestamp`
+/// (plus opaque `fingerprint` cursor pagination). So `transfers_for_address`
+/// treats the `BlockRange` it's given as a **millisecond-since-epoch window**
+/// rather than a block-height window: `range.from_height()`/`to_height()`
+/// are read as timestamps, and every `Transfer`/`BlockRef` this source
+/// produces (including `latest_block()`) carries `block_timestamp` in the
+/// `height` field, not the real Tron block number. This lets the fully
+/// generic incremental-refetch logic in `usecase::ingestion` (which is
+/// written in terms of `TransferRepository::min/max_block_height` +
+/// `ChainMeta::confirmation_depth`) work unmodified for Tron — it just
+/// happens to be doing arithmetic on timestamps instead of block counts for
+/// this one chain. The cost is cosmetic: the `block` field on a Tron edge in
+/// `/graph` shows a ms timestamp, not a literal block number.
 #[derive(Clone)]
 pub struct TronGridSource {
     base_url: String,
@@ -105,6 +131,7 @@ pub struct TronGridSource {
     page_cache: Cache<PageKey, PageValue>,
     file_cache_dir: Option<PathBuf>,
     max_pages_per_endpoint: u32,
+    is_contract_cache: Cache<Vec<u8>, bool>,
 }
 
 impl TronGridSource {
@@ -114,6 +141,10 @@ impl TronGridSource {
             .weigher(|_k: &PageKey, v: &PageValue| v.0.len().max(1) as u32)
             .time_to_live(config.page_cache_ttl)
             .build();
+        let is_contract_cache = Cache::builder()
+            .max_capacity(50_000)
+            .time_to_live(Duration::from_secs(24 * 60 * 60))
+            .build();
 
         Self {
             base_url: config.base_url.trim_end_matches('/').to_string(),
@@ -122,11 +153,20 @@ impl TronGridSource {
             page_cache,
             file_cache_dir: config.file_cache_dir,
             max_pages_per_endpoint: config.max_pages_per_endpoint,
+            is_contract_cache,
         }
     }
 
     fn req(&self, url: &str) -> reqwest::RequestBuilder {
         let mut b = self.client.get(url);
+        if let Some(key) = &self.api_key {
+            b = b.header("TRON-PRO-API-KEY", key);
+        }
+        b
+    }
+
+    fn post_req(&self, url: &str) -> reqwest::RequestBuilder {
+        let mut b = self.client.post(url);
         if let Some(key) = &self.api_key {
             b = b.header("TRON-PRO-API-KEY", key);
         }
@@ -181,6 +221,8 @@ impl TronGridSource {
         endpoint: &Endpoint,
         address_b58: &str,
         fingerprint: Option<&str>,
+        min_ts: Option<u64>,
+        max_ts: Option<u64>,
     ) -> Option<PathBuf> {
         let dir = self.file_cache_dir.as_ref()?;
         let fp = match fingerprint {
@@ -190,7 +232,12 @@ impl TronGridSource {
                 hex::encode(Sha256::digest(f.as_bytes()))
             }
         };
-        Some(dir.join(format!("{}__{address_b58}__{fp}.json", endpoint.prefix())))
+        let min_s = min_ts.map(|v| v.to_string()).unwrap_or_else(|| "0".into());
+        let max_s = max_ts.map(|v| v.to_string()).unwrap_or_else(|| "max".into());
+        Some(dir.join(format!(
+            "{}__{address_b58}__{min_s}__{max_s}__{fp}.json",
+            endpoint.prefix()
+        )))
     }
 
     async fn body_for(
@@ -198,8 +245,10 @@ impl TronGridSource {
         endpoint: &Endpoint,
         address_b58: &str,
         fingerprint: Option<&str>,
+        min_ts: Option<u64>,
+        max_ts: Option<u64>,
     ) -> DomainResult<String> {
-        let path = self.file_path(endpoint, address_b58, fingerprint);
+        let path = self.file_path(endpoint, address_b58, fingerprint, min_ts, max_ts);
         if let Some(p) = path.as_deref()
             && let Ok(body) = tokio::fs::read_to_string(p).await
         {
@@ -210,8 +259,10 @@ impl TronGridSource {
             "{}{}",
             self.base_url,
             match endpoint {
-                Endpoint::Native => endpoints::native_transfers(address_b58, fingerprint),
-                Endpoint::Trc20 => endpoints::trc20_transfers(address_b58, fingerprint),
+                Endpoint::Native =>
+                    endpoints::native_transfers(address_b58, fingerprint, min_ts, max_ts),
+                Endpoint::Trc20 =>
+                    endpoints::trc20_transfers(address_b58, fingerprint, min_ts, max_ts),
             }
         );
         let body = self.http_get_text(&url).await?;
@@ -226,11 +277,18 @@ impl TronGridSource {
         Ok(body)
     }
 
+    /// `min_ts`/`max_ts` are ms-since-epoch bounds forwarded to TronGrid's
+    /// `min_timestamp`/`max_timestamp` query params, letting the API itself
+    /// skip pages outside the requested window — this is what makes
+    /// incremental (hot-tail / gap-only) refetch actually reduce network
+    /// calls instead of always re-walking full history.
     async fn collect(
         &self,
         endpoint: Endpoint,
         address_b58: &str,
         max_transfers: usize,
+        min_ts: Option<u64>,
+        max_ts: Option<u64>,
     ) -> DomainResult<Vec<Transfer>> {
         let mut all = Vec::new();
         let mut fingerprint: Option<String> = None;
@@ -240,12 +298,14 @@ impl TronGridSource {
                 endpoint: endpoint.clone(),
                 address_b58: address_b58.to_string(),
                 fingerprint: fingerprint.clone(),
+                min_ts,
+                max_ts,
             };
             let value = if let Some(v) = self.page_cache.get(&key).await {
                 v
             } else {
                 let body = self
-                    .body_for(&endpoint, address_b58, fingerprint.as_deref())
+                    .body_for(&endpoint, address_b58, fingerprint.as_deref(), min_ts, max_ts)
                     .await?;
                 let parsed = match endpoint {
                     Endpoint::Native => parse_native(&body)?,
@@ -270,9 +330,64 @@ impl TronGridSource {
             endpoint = endpoint.prefix(),
             pages = page_n,
             transfers = all.len(),
+            ?min_ts,
+            ?max_ts,
             "trongrid pagination done"
         );
         Ok(all)
+    }
+
+    async fn is_contract_impl(&self, addr: &Address) -> DomainResult<Option<bool>> {
+        let bytes = addr.bytes().to_vec();
+        if let Some(cached) = self.is_contract_cache.get(&bytes).await {
+            return Ok(Some(cached));
+        }
+
+        let hex_addr = hex::encode(&bytes);
+        let url = format!("{}/wallet/getcontract", self.base_url);
+        let resp = match self
+            .post_req(&url)
+            .json(&serde_json::json!({ "value": hex_addr }))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "trongrid getcontract request failed");
+                return Ok(None);
+            }
+        };
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(DomainError::RateLimited("trongrid getcontract rate limited".into()));
+        }
+        if !resp.status().is_success() {
+            tracing::debug!(status = %resp.status(), "trongrid getcontract non-success status");
+            return Ok(None);
+        }
+        let text = match resp.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "trongrid getcontract body read failed");
+                return Ok(None);
+            }
+        };
+        let value: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, body = %text, "trongrid getcontract parse failed");
+                return Ok(None);
+            }
+        };
+
+        // A non-contract address returns an empty object (`{}`) or an
+        // `{"Error": "..."}` payload; a contract returns its bytecode (and
+        // usually an ABI). Presence of non-empty bytecode is the signal.
+        let is_contract = value
+            .get("bytecode")
+            .and_then(|b| b.as_str())
+            .is_some_and(|s| !s.is_empty());
+        self.is_contract_cache.insert(bytes, is_contract).await;
+        Ok(Some(is_contract))
     }
 }
 
@@ -288,10 +403,12 @@ impl ChainSource for TronGridSource {
         let value: serde_json::Value = serde_json::from_str(&body)
             .map_err(|e| DomainError::InsufficientData(format!("getnowblock parse: {e}")))?;
 
-        let height = value
+        // `height` is the block's ms-since-epoch timestamp, not the literal
+        // Tron block number — see the module doc comment above.
+        let timestamp_ms = value
             .get("block_header")
             .and_then(|h| h.get("raw_data"))
-            .and_then(|r| r.get("number"))
+            .and_then(|r| r.get("timestamp"))
             .and_then(|n| n.as_u64())
             .unwrap_or(0);
         let hash_hex = value
@@ -299,7 +416,7 @@ impl ChainSource for TronGridSource {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let hash = parse_hash32_or_zero(hash_hex);
-        Ok(BlockRef::new(ChainId::TRON, height, hash))
+        Ok(BlockRef::new(ChainId::TRON, timestamp_ms, hash))
     }
 
     async fn fetch_block(&self, height: u64) -> DomainResult<NormalizedBlock> {
@@ -311,7 +428,7 @@ impl ChainSource for TronGridSource {
     async fn transfers_for_address(
         &self,
         addr: &Address,
-        _range: BlockRange,
+        range: BlockRange,
         max_transfers: usize,
     ) -> DomainResult<Vec<Transfer>> {
         if addr.chain() != ChainId::TRON {
@@ -321,11 +438,26 @@ impl ChainSource for TronGridSource {
             )));
         }
         let address_b58 = addr.canonical();
-        tracing::info!(address = %address_b58, max_transfers, "fetching transfers from trongrid");
+
+        // `range`'s bounds are ms-since-epoch timestamps for this source
+        // (see module docs) — pass them straight through as TronGrid's
+        // `min_timestamp`/`max_timestamp` filters, omitting the ones that
+        // are just the unbounded default so a fresh (never-ingested)
+        // address still gets a plain full-history fetch.
+        let min_ts = (range.from_height() > 0).then_some(range.from_height());
+        let max_ts = (range.to_height() < u64::MAX).then_some(range.to_height());
+
+        tracing::info!(
+            address = %address_b58,
+            max_transfers,
+            ?min_ts,
+            ?max_ts,
+            "fetching transfers from trongrid"
+        );
 
         let (native, trc20) = tokio::try_join!(
-            self.collect(Endpoint::Native, &address_b58, max_transfers),
-            self.collect(Endpoint::Trc20, &address_b58, max_transfers),
+            self.collect(Endpoint::Native, &address_b58, max_transfers, min_ts, max_ts),
+            self.collect(Endpoint::Trc20, &address_b58, max_transfers, min_ts, max_ts),
         )?;
 
         tracing::info!(
@@ -338,6 +470,13 @@ impl ChainSource for TronGridSource {
         let mut out = native;
         out.extend(trc20);
         Ok(out)
+    }
+
+    async fn is_contract(&self, addr: &Address) -> DomainResult<Option<bool>> {
+        if addr.chain() != ChainId::TRON {
+            return Ok(None);
+        }
+        self.is_contract_impl(addr).await
     }
 }
 
@@ -403,7 +542,9 @@ fn map_native(raw: dto::RawTransaction) -> anyhow::Result<Option<Transfer>> {
         return Ok(None);
     }
 
-    let block_ref = BlockRef::new(ChainId::TRON, 0, tx_hash);
+    // `height` = block_timestamp (ms since epoch), not the real Tron block
+    // number — this source's incremental-fetch convention (see module docs).
+    let block_ref = BlockRef::new(ChainId::TRON, block_ts.max(0) as u64, tx_hash);
     Ok(Some(Transfer::new(
         TransferId::new(ChainId::TRON, tx_hash, 0),
         ChainId::TRON,
@@ -440,7 +581,10 @@ fn map_trc20(rec: dto::Trc20Transfer) -> anyhow::Result<Transfer> {
         if s.is_empty() { None } else { Some(s.to_string()) }
     };
 
-    let block_ref = BlockRef::new(ChainId::TRON, 0, tx_hash);
+    // `height` = block_timestamp (ms since epoch); see module docs. The
+    // TRC20 endpoint doesn't expose a real block number at all, so this is
+    // also the only option here, not just a convention shared with native.
+    let block_ref = BlockRef::new(ChainId::TRON, block_ts.max(0) as u64, tx_hash);
     Ok(Transfer::new(
         TransferId::new(ChainId::TRON, tx_hash, 0),
         ChainId::TRON,

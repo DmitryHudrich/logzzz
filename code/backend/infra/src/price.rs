@@ -7,6 +7,7 @@ use domain::chain::ChainId;
 use domain::error::DomainResult;
 use domain::ports::PricePort;
 use domain::price::UnitPrice;
+use domain::primitives::Address;
 
 /// In-memory price provider seeded with a few common assets. Suitable for a
 /// baseline MVP; meant to be swapped for a real provider (CoinGecko, BigQuery,
@@ -31,6 +32,16 @@ impl StaticPriceProvider {
         let usdc = hex::decode("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
         by_asset.insert(AssetId::contract(ChainId::ETH, usdt), 1.0);
         by_asset.insert(AssetId::contract(ChainId::ETH, usdc), 1.0);
+
+        // USDT-TRC20 — by far the most heavily used Tron asset; without this
+        // every TRC20-USDT transfer gets `usd_value = None` and silently
+        // drops out of every USD-denominated heuristic (fixed-amount
+        // clustering, edge_significance's usd_weight, ...).
+        let usdt_trc20 = Address::parse(ChainId::TRON, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t")
+            .expect("hardcoded Tron USDT address must parse")
+            .bytes()
+            .to_vec();
+        by_asset.insert(AssetId::contract(ChainId::TRON, usdt_trc20), 1.0);
 
         Self { by_asset }
     }

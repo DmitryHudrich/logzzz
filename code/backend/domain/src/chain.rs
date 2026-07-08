@@ -172,7 +172,14 @@ impl ChainRegistry {
                     ChainFamily::Tron,
                     AddressModel::Account,
                     AddressEncoding::TronBase58Check,
-                    20,
+                    // NOT a block count: `TronGridSource` uses ms-since-epoch
+                    // block timestamps as its incremental cursor (TronGrid's
+                    // REST API filters by `min_timestamp`/`max_timestamp`,
+                    // not by block height), so this chain's `height` unit is
+                    // milliseconds. 60_000ms mirrors the ~20-block (~60s)
+                    // solidification window the old block-count value stood
+                    // for — see tron_source.rs module docs.
+                    60_000,
                     "TRX",
                     6,
                 ),
