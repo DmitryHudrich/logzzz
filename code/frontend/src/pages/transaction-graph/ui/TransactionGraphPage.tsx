@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence } from 'framer-motion'
 import { AlertCircle, Eye, EyeOff, Loader2, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
@@ -15,6 +15,7 @@ import {
   type FetchGraphPayload,
   type TransactionGraphPage as TransactionGraphPageData,
 } from '@/entities/transaction'
+import { fetchAddressLabel, upsertAddressLabel, type AddressLabel, type EntityCategory, type SanctionList } from '@/entities/label'
 import { TransactionGraphControls } from '@/features/transaction-graph-controls'
 import { TransactionGraphFlowForm } from '@/features/transaction-graph-flow'
 import { graphFlowFormToPayload, type GraphFlowFormValues } from '@/features/transaction-graph-flow/model/form-schema'
@@ -30,7 +31,6 @@ import { Input } from '@/shared/ui/input'
 import { Label } from '@/shared/ui/label'
 import { ScrollArea } from '@/shared/ui/scroll-area'
 import { Skeleton } from '@/shared/ui/skeleton'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/shared/ui/tooltip'
 import { TransactionGraphLegend } from '@/widgets/transaction-graph/ui/TransactionGraphLegend'
 
 const TransactionGraphWidget = lazy(async () => {
@@ -63,7 +63,6 @@ type SourceSettingsDraft = {
 export const TransactionGraphPage = () => {
   const [layout, setLayout] = useState<GraphLayoutMode>('force')
   const [selectedNodeId, setSelectedNodeId] = useState('')
-  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [graphSources, setGraphSources] = useState<GraphSource[]>([])
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null)
@@ -75,6 +74,9 @@ export const TransactionGraphPage = () => {
   const [loadingSourceId, setLoadingSourceId] = useState<string | null>(null)
   const [selectedBlockRange, setSelectedBlockRange] = useState<{ from: number; to: number } | null>(null)
   const [rebuildMode, setRebuildMode] = useState<'fetch' | 'draw'>('fetch')
+  const [labelByAddress, setLabelByAddress] = useState<Record<string, AddressLabel>>({})
+  const [isSavingLabel, setIsSavingLabel] = useState(false)
+  const loadedLabelAddressesRef = useRef<Set<string>>(new Set())
 
   const debouncedQuery = useDebouncedValue(query, 200)
   const ingestMutation = useIngestWalletMutation()
@@ -113,14 +115,30 @@ export const TransactionGraphPage = () => {
   const showBackendEmptyState = !hasBackendData && !isLoadingGraph
 
   const baseGraph = useMemo(() => transactionGraphPageToGraphData(blockFilteredGraphPage), [blockFilteredGraphPage])
+  const graphWithLabelName = useMemo(
+    () => ({
+      ...baseGraph,
+      nodes: baseGraph.nodes.map((node) => {
+        const label = labelByAddress[normalizeAddress(node.id)]
+        if (!label) {
+          return node
+        }
+        return {
+          ...node,
+          label: formatAddressLabel(label),
+        }
+      }),
+    }),
+    [baseGraph, labelByAddress],
+  )
   const rootNodeIds = useMemo(
     () => new Set(enabledSources.map((source) => source.rootAddress)),
     [enabledSources],
   )
 
   const filteredGraph = useMemo(
-    () => filterGraphData(baseGraph, blockFilteredGraphPage, debouncedQuery),
-    [baseGraph, blockFilteredGraphPage, debouncedQuery],
+    () => filterGraphData(graphWithLabelName, blockFilteredGraphPage, debouncedQuery),
+    [graphWithLabelName, blockFilteredGraphPage, debouncedQuery],
   )
 
   const visibleNodeIds = useMemo(() => {
@@ -137,26 +155,26 @@ export const TransactionGraphPage = () => {
     return new Set(filteredGraph.edges.map((edge) => edge.id))
   }, [debouncedQuery, filteredGraph.edges])
 
-  const selectedNodeLabel = useMemo(() => {
+  const selectedNodeDisplayLabel = useMemo(() => {
     if (!selectedNodeId) {
       return null
     }
-    return baseGraph.nodes.find((node) => node.id === selectedNodeId)?.label ?? selectedNodeId
-  }, [baseGraph.nodes, selectedNodeId])
+    return graphWithLabelName.nodes.find((node) => node.id === selectedNodeId)?.label ?? selectedNodeId
+  }, [graphWithLabelName.nodes, selectedNodeId])
 
-  const hoveredNodeLabel = useMemo(() => {
-    if (!hoveredNodeId) {
+  const selectedNodeAddressLabel = useMemo(() => {
+    if (!selectedNodeId) {
       return null
     }
-    return baseGraph.nodes.find((node) => node.id === hoveredNodeId)?.label ?? hoveredNodeId
-  }, [baseGraph.nodes, hoveredNodeId])
+    return labelByAddress[normalizeAddress(selectedNodeId)] ?? null
+  }, [labelByAddress, selectedNodeId])
 
   const selectedNodeDetails = useMemo(() => {
     if (!selectedNodeId) {
       return null
     }
-    return getTransactionNodeDetails(blockFilteredGraphPage, baseGraph, selectedNodeId)
-  }, [baseGraph, blockFilteredGraphPage, selectedNodeId])
+    return getTransactionNodeDetails(blockFilteredGraphPage, graphWithLabelName, selectedNodeId)
+  }, [blockFilteredGraphPage, graphWithLabelName, selectedNodeId])
 
   const ingestStatus = jobStatusQuery.data?.status.toLowerCase() ?? null
   const ingestProgress = useMemo(() => {
@@ -178,13 +196,6 @@ export const TransactionGraphPage = () => {
     }
     setSelectedNodeId('')
   }, [baseGraph.nodes, selectedNodeId])
-
-  useEffect(() => {
-    if (!hoveredNodeId || baseGraph.nodes.some((node) => node.id === hoveredNodeId)) {
-      return
-    }
-    setHoveredNodeId(null)
-  }, [baseGraph.nodes, hoveredNodeId])
 
   useEffect(() => {
     if (!activeSource) {
@@ -296,6 +307,7 @@ export const TransactionGraphPage = () => {
 
       const page = await drawGraphMutation.mutateAsync(normalizedPayload)
       upsertGraphSource({ page, payload: normalizedPayload, sourceId: effectiveSourceId })
+      await hydrateLabelForGraph(page)
     } catch (error) {
       setGraphSources((previous) =>
         previous
@@ -330,6 +342,41 @@ export const TransactionGraphPage = () => {
     await loadGraphSource({ payload, withIngest: false })
   }
 
+  const applyFetchedLabel = (label: AddressLabel) => {
+    setLabelByAddress((previous) => {
+      const next = { ...previous }
+      const normalizedAddresses = label.addresses.map((address) => normalizeAddress(address))
+      for (const address of normalizedAddresses) {
+        next[address] = label
+      }
+      return next
+    })
+    for (const address of label.addresses) {
+      loadedLabelAddressesRef.current.add(normalizeAddress(address))
+    }
+  }
+
+  const hydrateLabelForGraph = async (page: TransactionGraphPageData) => {
+    const addresses = collectGraphAddresses(page).filter(
+      (address) => !loadedLabelAddressesRef.current.has(normalizeAddress(address)),
+    )
+    if (addresses.length === 0) {
+      return
+    }
+
+    addresses.forEach((address) => {
+      loadedLabelAddressesRef.current.add(normalizeAddress(address))
+    })
+
+    const results = await Promise.allSettled(addresses.map((address) => fetchAddressLabel(address, 1)))
+    results.forEach((result) => {
+      if (result.status !== 'fulfilled' || !result.value) {
+        return
+      }
+      applyFetchedLabel(result.value)
+    })
+  }
+
   const onAddOriginFromSelectedNode = async ({
     maxDepth,
     maxNodes,
@@ -351,6 +398,32 @@ export const TransactionGraphPage = () => {
       },
       withIngest: mode === 'fetch',
     })
+  }
+
+  const onSaveLabelForSelectedNode = async (payload: {
+    category: EntityCategory | string
+    labelName: string
+    sanctionList: SanctionList | string | null
+  }) => {
+    if (!selectedNodeId) {
+      return
+    }
+    setIsSavingLabel(true)
+    try {
+      const label = await upsertAddressLabel({
+        address: selectedNodeId,
+        category: payload.category,
+        labelName: payload.labelName,
+        sanctionList: payload.sanctionList,
+        chainId: 1,
+      })
+      applyFetchedLabel(label)
+      toast.success('Label saved')
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to save label.'))
+    } finally {
+      setIsSavingLabel(false)
+    }
   }
 
   const onApplyActiveSourceSettings = async () => {
@@ -435,7 +508,7 @@ export const TransactionGraphPage = () => {
         onLayoutChange={setLayout}
         nodeCount={filteredGraph.nodes.length}
         edgeCount={filteredGraph.edges.length}
-        selectedNodeLabel={selectedNodeLabel}
+        selectedNodeLabel={selectedNodeDisplayLabel}
         blockRange={blockRange}
         selectedBlockRange={selectedBlockRange}
         onBlockRangeChange={setSelectedBlockRange}
@@ -452,18 +525,23 @@ export const TransactionGraphPage = () => {
               {graphSources.map((source) => {
                 const isActive = source.id === activeSourceId
                 const isSourceLoading = source.isLoading || source.id === loadingSourceId
+                const normalizedRootAddress = normalizeAddress(source.rootAddress)
+                const sourceLabel = labelByAddress[normalizedRootAddress]
+                  ? formatAddressLabel(labelByAddress[normalizedRootAddress])
+                  : shortAddress(source.rootAddress)
                 return (
                   <div key={source.id} className='inline-flex items-center gap-1 rounded-md border border-border/60 bg-background/70 p-1'>
                     <button
                       type='button'
                       onClick={() => setActiveSourceId(source.id)}
+                      title={sourceLabel}
                       className={cn(
                         'inline-flex items-center gap-1 rounded px-2 py-1 text-xs leading-none whitespace-nowrap transition-colors',
                         isActive ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent',
                       )}
                     >
                       {isSourceLoading ? <Loader2 className='size-3 shrink-0 animate-spin' /> : null}
-                      {shortAddress(source.rootAddress)}
+                      <span className='max-w-44 truncate'>{sourceLabel}</span>
                     </button>
                     <Button
                       type='button'
@@ -559,17 +637,6 @@ export const TransactionGraphPage = () => {
 
       <TransactionGraphLegend />
 
-      {hoveredNodeLabel && !selectedNodeId ? (
-        <div className='pointer-events-none absolute top-3 right-3 z-10'>
-          <Tooltip open>
-            <TooltipTrigger asChild>
-              <span className='sr-only'>{hoveredNodeLabel}</span>
-            </TooltipTrigger>
-            <TooltipContent side='left'>{hoveredNodeLabel}</TooltipContent>
-          </Tooltip>
-        </div>
-      ) : null}
-
       <div className='relative min-h-0 flex-1'>
         <Suspense
           fallback={
@@ -580,14 +647,13 @@ export const TransactionGraphPage = () => {
           }
         >
           <TransactionGraphWidget
-            graph={baseGraph}
+            graph={graphWithLabelName}
             layout={layout}
             rootNodeIds={rootNodeIds}
             selectedNodeId={selectedNodeId}
             visibleNodeIds={visibleNodeIds}
             visibleEdgeIds={visibleEdgeIds}
             onSelectNode={setSelectedNodeId}
-            onHoverNode={setHoveredNodeId}
           />
         </Suspense>
 
@@ -666,6 +732,9 @@ export const TransactionGraphPage = () => {
         defaultMaxDepth={mainFormPayload.max_depth ?? 2}
         defaultMaxNodes={mainFormPayload.max_nodes ?? 500}
         isAddingOrigin={isLoadingGraph}
+        label={selectedNodeAddressLabel}
+        onSaveLabel={onSaveLabelForSelectedNode}
+        isSavingLabel={isSavingLabel}
       />
     </main>
   )
@@ -673,6 +742,27 @@ export const TransactionGraphPage = () => {
 
 function normalizeAddress(address: string) {
   return address.trim().toLowerCase()
+}
+
+function formatAddressLabel(label: AddressLabel) {
+  const name = label.labelName?.trim() ?? ''
+  if (name) {
+    return name
+  }
+  if (label.category === 'sanctioned') {
+    return `sanctioned:${label.sanctionList ?? 'unknown'}`
+  }
+  return label.category
+}
+
+function collectGraphAddresses(page: TransactionGraphPageData) {
+  const addresses = new Set<string>()
+  page.nodes.forEach((address) => addresses.add(address))
+  page.edges.forEach((edge) => {
+    addresses.add(edge.from)
+    addresses.add(edge.to)
+  })
+  return Array.from(addresses)
 }
 
 function shortAddress(address: string) {
