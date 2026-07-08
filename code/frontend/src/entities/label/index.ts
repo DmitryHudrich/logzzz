@@ -6,4 +6,4 @@ export {
   type SanctionList,
   type UpsertAddressLabelPayload,
 } from '@/entities/label/model/label'
-export { fetchAddressLabel, upsertAddressLabel } from '@/entities/label/api/label'
+export { deleteAddressLabel, fetchAddressLabel, upsertAddressLabel } from '@/entities/label/api/label'

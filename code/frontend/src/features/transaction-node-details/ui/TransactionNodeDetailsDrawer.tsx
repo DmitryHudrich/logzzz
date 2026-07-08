@@ -39,6 +39,8 @@ type TransactionNodeDetailsDrawerProps = {
     sanctionList: SanctionList | string | null
   }) => Promise<void> | void
   isSavingLabel?: boolean
+  onDeleteLabel?: () => Promise<void> | void
+  isDeletingLabel?: boolean
 }
 
 const groupLabels: Record<string, string> = {
@@ -59,6 +61,8 @@ export const TransactionNodeDetailsDrawer = ({
   label = null,
   onSaveLabel,
   isSavingLabel = false,
+  onDeleteLabel,
+  isDeletingLabel = false,
 }: TransactionNodeDetailsDrawerProps) => {
   useEffect(() => {
     if (!open) {
@@ -104,6 +108,8 @@ export const TransactionNodeDetailsDrawer = ({
             label={label}
             onSaveLabel={onSaveLabel}
             isSavingLabel={isSavingLabel}
+            onDeleteLabel={onDeleteLabel}
+            isDeletingLabel={isDeletingLabel}
           />
         ) : (
           <div className='space-y-1.5 p-4'>
@@ -142,6 +148,8 @@ function PanelDetailsContent({
   label,
   onSaveLabel,
   isSavingLabel,
+  onDeleteLabel,
+  isDeletingLabel,
 }: {
   details: TransactionNodeDetails
   onAddOriginFromNode?: (params: {
@@ -159,6 +167,8 @@ function PanelDetailsContent({
     sanctionList: SanctionList | string | null
   }) => Promise<void> | void
   isSavingLabel: boolean
+  onDeleteLabel?: () => Promise<void> | void
+  isDeletingLabel: boolean
 }) {
   const [activeTab, setActiveTab] = useState<'transactions' | 'analytics' | 'label'>('transactions')
   const [extendMaxDepth, setExtendMaxDepth] = useState(String(defaultMaxDepth))
@@ -417,7 +427,7 @@ function PanelDetailsContent({
                     <Button
                       type='button'
                       className='w-full px-3 text-xs'
-                      disabled={isSavingLabel}
+                      disabled={isSavingLabel || isDeletingLabel}
 
                       onClick={() => {
                         const trimmed = labelNameInput.trim()
@@ -435,6 +445,19 @@ function PanelDetailsContent({
                       {isSavingLabel ? <Loader2 className='size-3 animate-spin' /> : null}
                       Save label
                     </Button>
+
+                    {label && onDeleteLabel ? (
+                      <Button
+                        type='button'
+                        variant='destructive'
+                        className='w-full px-3 text-xs'
+                        disabled={isSavingLabel || isDeletingLabel}
+                        onClick={() => void onDeleteLabel()}
+                      >
+                        {isDeletingLabel ? <Loader2 className='size-3 animate-spin' /> : null}
+                        Delete label
+                      </Button>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
