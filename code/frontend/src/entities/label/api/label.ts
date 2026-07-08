@@ -31,6 +31,12 @@ export async function upsertAddressLabel(payload: UpsertAddressLabelPayload): Pr
   return mapAddressLabel(parseLabelResponse(response))
 }
 
+export async function deleteAddressLabel(address: string, chainId = 1): Promise<void> {
+  await apiRequest<void>(`/labels/${address}?chain_id=${chainId}`, {
+    method: 'DELETE',
+  })
+}
+
 function mapAddressLabel(dto: ReturnType<typeof parseLabelResponse>): AddressLabel {
   return {
     entityId: dto.entity_id,

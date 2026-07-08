@@ -15,7 +15,14 @@ import {
   type FetchGraphPayload,
   type TransactionGraphPage as TransactionGraphPageData,
 } from '@/entities/transaction'
-import { fetchAddressLabel, upsertAddressLabel, type AddressLabel, type EntityCategory, type SanctionList } from '@/entities/label'
+import {
+  deleteAddressLabel,
+  fetchAddressLabel,
+  upsertAddressLabel,
+  type AddressLabel,
+  type EntityCategory,
+  type SanctionList,
+} from '@/entities/label'
 import { TransactionGraphControls } from '@/features/transaction-graph-controls'
 import { TransactionGraphFlowForm } from '@/features/transaction-graph-flow'
 import { graphFlowFormToPayload, type GraphFlowFormValues } from '@/features/transaction-graph-flow/model/form-schema'
@@ -76,6 +83,7 @@ export const TransactionGraphPage = () => {
   const [rebuildMode, setRebuildMode] = useState<'fetch' | 'draw'>('fetch')
   const [labelByAddress, setLabelByAddress] = useState<Record<string, AddressLabel>>({})
   const [isSavingLabel, setIsSavingLabel] = useState(false)
+  const [isDeletingLabel, setIsDeletingLabel] = useState(false)
   const loadedLabelAddressesRef = useRef<Set<string>>(new Set())
 
   const debouncedQuery = useDebouncedValue(query, 200)
@@ -426,6 +434,31 @@ export const TransactionGraphPage = () => {
     }
   }
 
+  const onDeleteLabelForSelectedNode = async () => {
+    if (!selectedNodeId) {
+      return
+    }
+    setIsDeletingLabel(true)
+    try {
+      await deleteAddressLabel(selectedNodeId, 1)
+      const normalizedAddress = normalizeAddress(selectedNodeId)
+      setLabelByAddress((previous) => {
+        if (!previous[normalizedAddress]) {
+          return previous
+        }
+        const next = { ...previous }
+        delete next[normalizedAddress]
+        return next
+      })
+      loadedLabelAddressesRef.current.delete(normalizedAddress)
+      toast.success('Label deleted')
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to delete label.'))
+    } finally {
+      setIsDeletingLabel(false)
+    }
+  }
+
   const onApplyActiveSourceSettings = async () => {
     if (!activeSource || !sourceSettingsDraft) {
       return
@@ -735,6 +768,8 @@ export const TransactionGraphPage = () => {
         label={selectedNodeAddressLabel}
         onSaveLabel={onSaveLabelForSelectedNode}
         isSavingLabel={isSavingLabel}
+        onDeleteLabel={onDeleteLabelForSelectedNode}
+        isDeletingLabel={isDeletingLabel}
       />
     </main>
   )
