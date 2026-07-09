@@ -186,11 +186,10 @@ async fn run_cycle(
 
         if same_path_same_hash {
             stats.files_skipped += 1;
-            if let Some(output_dir) = tracked_output_dir.as_ref() {
-                if let Some(summary) = tracked_stats.get_mut(output_dir) {
+            if let Some(output_dir) = tracked_output_dir.as_ref()
+                && let Some(summary) = tracked_stats.get_mut(output_dir) {
                     summary.files_skipped += 1;
                 }
-            }
             continue;
         }
 
@@ -211,11 +210,10 @@ async fn run_cycle(
                 .or_default()
                 .insert(current_file_hash);
             stats.files_skipped += 1;
-            if let Some(output_dir) = tracked_output_dir.as_ref() {
-                if let Some(summary) = tracked_stats.get_mut(output_dir) {
+            if let Some(output_dir) = tracked_output_dir.as_ref()
+                && let Some(summary) = tracked_stats.get_mut(output_dir) {
                     summary.files_skipped += 1;
                 }
-            }
             continue;
         }
 
@@ -256,13 +254,12 @@ async fn run_cycle(
             .or_default()
             .insert(current_file_hash);
 
-        if let Some(output_dir) = tracked_output_dir.as_ref() {
-            if let Some(summary) = tracked_stats.get_mut(output_dir) {
+        if let Some(output_dir) = tracked_output_dir.as_ref()
+            && let Some(summary) = tracked_stats.get_mut(output_dir) {
                 summary.files_parsed += 1;
                 summary.records_inserted += records_inserted;
                 summary.issues_found += issues_found;
             }
-        }
     }
 
     let mut dirs_to_remove = extracted_paths;
@@ -280,11 +277,10 @@ async fn run_cycle(
             continue;
         }
 
-        if let Err(e) = tokio::fs::remove_dir_all(&path).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
+        if let Err(e) = tokio::fs::remove_dir_all(&path).await
+            && e.kind() != std::io::ErrorKind::NotFound {
                 error!(error = %e, output_dir = %path.display(), "cannot remove extracted dir");
             }
-        }
     }
 
     Ok(stats)
@@ -381,14 +377,13 @@ async fn process_pending_archives(
                         .and_then(|n| n.to_str())
                         .unwrap_or("archive")
                         .to_string();
-                    if let Ok(Some(request)) = load_upload_request(&archive_path).await {
-                        if let Err(e) =
+                    if let Ok(Some(request)) = load_upload_request(&archive_path).await
+                        && let Err(e) =
                             write_needs_password_marker(&archive_path, &original_name, request)
                                 .await
                         {
                             warn!(error = %e, "failed to write needs-password marker");
                         }
-                    }
                 }
             }
             Ok(Err(error)) => {

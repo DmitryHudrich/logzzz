@@ -45,6 +45,8 @@ pub struct Cli {
     pub max_results: Option<usize>,
     #[arg(long)]
     pub proxy: Option<String>,
+    #[arg(long, value_delimiter = ',')]
+    pub allowed_user_ids: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Parser)]
@@ -70,9 +72,11 @@ pub struct DownloaderCli {
     pub api_hash: Option<String>,
     #[arg(long)]
     pub proxy: Option<String>,
+    #[arg(long)]
+    pub rest_api_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct AppConfig {
     pub clickhouse: ClickhouseConfig,
     pub migrations_dir: String,
@@ -83,14 +87,40 @@ pub struct AppConfig {
     pub socks_proxy: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("clickhouse", &self.clickhouse)
+            .field("migrations_dir", &self.migrations_dir)
+            .field("input_dir", &self.input_dir)
+            .field("archive_dir", &self.archive_dir)
+            .field("poll_interval_secs", &self.poll_interval_secs)
+            .field("telegram", &self.telegram)
+            .field("socks_proxy", &redact_opt(&self.socks_proxy))
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize)]
 pub struct TelegramConfig {
     pub token: String,
     pub results_dir: String,
     pub max_results: usize,
+    pub allowed_user_ids: Vec<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl std::fmt::Debug for TelegramConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramConfig")
+            .field("token", &redact(&self.token))
+            .field("results_dir", &self.results_dir)
+            .field("max_results", &self.max_results)
+            .field("allowed_user_ids", &self.allowed_user_ids)
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize)]
 pub struct ClickhouseConfig {
     pub url: String,
     pub user: String,
@@ -99,7 +129,19 @@ pub struct ClickhouseConfig {
     pub app_database: String,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for ClickhouseConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClickhouseConfig")
+            .field("url", &self.url)
+            .field("user", &self.user)
+            .field("password", &redact(&self.password))
+            .field("database", &self.database)
+            .field("app_database", &self.app_database)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct DownloaderConfig {
     pub peer_name: String,
     pub archive_dir: String,
@@ -110,6 +152,37 @@ pub struct DownloaderConfig {
     pub api_id: i32,
     pub api_hash: String,
     pub socks_proxy: Option<String>,
+    pub rest_api_token: Option<String>,
+}
+
+impl std::fmt::Debug for DownloaderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DownloaderConfig")
+            .field("peer_name", &self.peer_name)
+            .field("archive_dir", &self.archive_dir)
+            .field("state_file", &self.state_file)
+            .field("poll_interval_secs", &self.poll_interval_secs)
+            .field("session_file", &self.session_file)
+            .field("rest_listen_addr", &self.rest_listen_addr)
+            .field("api_id", &self.api_id)
+            .field("api_hash", &redact(&self.api_hash))
+            .field("socks_proxy", &redact_opt(&self.socks_proxy))
+            .field("rest_api_token", &redact_opt(&self.rest_api_token))
+            .finish()
+    }
+}
+
+/// Masks a secret so `Debug`-printing a config (e.g. an accidental `{:?}` in a log
+/// line or panic message) can't leak it, while still showing whether it was set.
+fn redact(value: &str) -> &'static str {
+    if value.is_empty() { "<empty>" } else { "<redacted>" }
+}
+
+fn redact_opt(value: &Option<String>) -> &'static str {
+    match value {
+        Some(_) => "<redacted>",
+        None => "<unset>",
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -137,6 +210,7 @@ struct PartialTelegramConfig {
     pub token: Option<String>,
     pub results_dir: Option<String>,
     pub max_results: Option<usize>,
+    pub allowed_user_ids: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -149,6 +223,7 @@ struct PartialDownloaderConfig {
     pub rest_listen_addr: Option<String>,
     pub api_id: Option<i32>,
     pub api_hash: Option<String>,
+    pub rest_api_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -166,6 +241,7 @@ struct LogzzEnv {
     results_dir: Option<String>,
     max_results: Option<usize>,
     socks: Option<String>,
+    allowed_user_ids: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -179,20 +255,21 @@ struct DownloaderEnv {
     api_id: Option<i32>,
     api_hash: Option<String>,
     socks: Option<String>,
+    rest_api_token: Option<String>,
 }
 
 pub fn load_config(cli: &Cli) -> Result<AppConfig> {
     let file = read_yaml_config(&cli.config)?;
-    Ok(build_app_config(file, cli, LogzzEnv::from_env())?)
+    build_app_config(file, cli, LogzzEnv::from_env())
 }
 
 pub fn load_downloader_config(cli: &DownloaderCli) -> Result<DownloaderConfig> {
     let file = read_yaml_config(&cli.config)?;
-    Ok(build_downloader_config(
+    build_downloader_config(
         file,
         cli,
         DownloaderEnv::from_env(),
-    )?)
+    )
 }
 
 fn read_yaml_config(path: &str) -> Result<FileConfig> {
@@ -253,15 +330,14 @@ fn build_app_config(file: FileConfig, cli: &Cli, env: LogzzEnv) -> Result<AppCon
     Ok(AppConfig {
         socks_proxy: env.socks.or(cli.proxy.clone()),
         clickhouse,
-        migrations_dir: pick_required(
-            "migrations_dir",
+        migrations_dir: pick_first(
             [
                 env.migrations_dir,
                 cli.migrations_dir.clone(),
                 file.migrations_dir,
             ],
-        )
-        .unwrap_or_else(|_| DEFAULT_MIGRATIONS_DIR.to_string()),
+            || DEFAULT_MIGRATIONS_DIR.to_string(),
+        ),
         input_dir: pick_first(
             [env.input_dir, cli.input_dir.clone(), file.input_dir],
             || DEFAULT_INPUT_DIR.to_string(),
@@ -298,6 +374,14 @@ fn build_app_config(file: FileConfig, cli: &Cli, env: LogzzEnv) -> Result<AppCon
             max_results: pick_first_value(
                 [env.max_results, cli.max_results, file_telegram.max_results],
                 50,
+            ),
+            allowed_user_ids: pick_first(
+                [
+                    env.allowed_user_ids,
+                    cli.allowed_user_ids.clone(),
+                    file_telegram.allowed_user_ids,
+                ],
+                Vec::new,
             ),
         },
     })
@@ -372,6 +456,10 @@ fn build_downloader_config(
             "downloader.api_hash",
             [env.api_hash, cli.api_hash.clone(), file_downloader.api_hash],
         )?,
+        rest_api_token: env
+            .rest_api_token
+            .or(cli.rest_api_token.clone())
+            .or(file_downloader.rest_api_token),
     })
 }
 
@@ -391,6 +479,8 @@ impl LogzzEnv {
             results_dir: get_env_string("LOGZZ_TELEGRAM__RESULTS_DIR"),
             max_results: get_env_parse("LOGZZ_TELEGRAM__MAX_RESULTS"),
             socks: get_env_string("LOGZZ_TELEGRAM__SOCKS"),
+            allowed_user_ids: get_env_string("LOGZZ_TELEGRAM__ALLOWED_USER_IDS")
+                .map(|raw| parse_id_list(&raw)),
         }
     }
 }
@@ -410,8 +500,17 @@ impl DownloaderEnv {
             api_id: first_env_parse(&["DOWNLOADER_API_ID", "TG_ID"]),
             api_hash: first_env_string(&["DOWNLOADER_API_HASH", "TG_HASH"]),
             socks: get_env_string("DOWNLOADER_TELEGRAM__SOCKS"),
+            rest_api_token: get_env_string("DOWNLOADER_REST_API_TOKEN"),
         }
     }
+}
+
+fn parse_id_list(raw: &str) -> Vec<i64> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect()
 }
 
 fn default_downloader_state_file(peer_name: &str) -> String {
@@ -488,6 +587,7 @@ mod tests {
                 token: Some("yaml-token".to_string()),
                 results_dir: Some("./yaml-results".to_string()),
                 max_results: Some(13),
+                allowed_user_ids: None,
             }),
             downloader: Some(PartialDownloaderConfig {
                 peer_name: Some("yaml-peer".to_string()),
@@ -498,6 +598,7 @@ mod tests {
                 rest_listen_addr: Some("127.0.0.1:19090".to_string()),
                 api_id: Some(100),
                 api_hash: Some("yaml-hash".to_string()),
+                rest_api_token: None,
             }),
         }
     }
@@ -519,6 +620,7 @@ mod tests {
             results_dir: None,
             max_results: Some(23),
             proxy: None,
+            allowed_user_ids: None,
         };
         let env = LogzzEnv {
             clickhouse_url: Some("http://env:8123".to_string()),
@@ -553,6 +655,7 @@ mod tests {
             api_id: None,
             api_hash: None,
             proxy: None,
+            rest_api_token: None,
         };
         let env = DownloaderEnv {
             archive_dir: Some("./env-archives".to_string()),
@@ -587,6 +690,7 @@ mod tests {
             api_id: Some(1),
             api_hash: Some("hash".to_string()),
             proxy: None,
+            rest_api_token: None,
         };
         let mut file = sample_file_config();
         file.downloader = Some(PartialDownloaderConfig {
@@ -627,6 +731,7 @@ mod tests {
                 telegram_token: None,
                 results_dir: None,
                 max_results: None,
+                allowed_user_ids: None,
             },
             LogzzEnv::default(),
         )
@@ -653,6 +758,7 @@ mod tests {
                 api_id: Some(1),
                 api_hash: Some("hash".to_string()),
                 proxy: None,
+                rest_api_token: None,
             },
             DownloaderEnv::default(),
         )
@@ -665,5 +771,40 @@ mod tests {
         );
         assert_eq!(cfg.session_file, "./.local/downloader/downloader.session");
         assert_eq!(cfg.rest_listen_addr, "127.0.0.1:8090");
+    }
+
+    #[test]
+    fn parse_id_list_handles_spaces_and_empty_segments() {
+        assert_eq!(parse_id_list("1, 2,3 ,,4"), vec![1, 2, 3, 4]);
+        assert_eq!(parse_id_list(""), Vec::<i64>::new());
+        assert_eq!(parse_id_list("not-a-number,5"), vec![5]);
+    }
+
+    #[test]
+    fn app_defaults_to_empty_allowlist_when_unset() {
+        let cfg = build_app_config(
+            sample_file_config(),
+            &Cli {
+                config: DEFAULT_CONFIG_PATH.to_string(),
+                clickhouse_url: None,
+                clickhouse_user: None,
+                clickhouse_password: None,
+                clickhouse_database: None,
+                app_database: None,
+                migrations_dir: None,
+                input_dir: None,
+                archive_dir: None,
+                poll_interval_secs: None,
+                telegram_token: None,
+                results_dir: None,
+                max_results: None,
+                proxy: None,
+                allowed_user_ids: None,
+            },
+            LogzzEnv::default(),
+        )
+        .unwrap();
+
+        assert!(cfg.telegram.allowed_user_ids.is_empty());
     }
 }

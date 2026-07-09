@@ -791,15 +791,12 @@ dependencies = [
 name = "downloader"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "axum",
  "clap",
  "grammers-client",
  "grammers-mtsender",
  "grammers-session",
  "logzz",
- "mime",
- "mime_guess",
  "serde",
  "serde_json",
  "tokio",

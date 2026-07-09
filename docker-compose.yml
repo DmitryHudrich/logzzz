@@ -7,9 +7,13 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-app_password}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     ports:
-      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      # Bound to loopback by default: this database holds imported credential data and
+      # ships with a weak default password (see .env.example) — publishing it beyond
+      # localhost requires deliberately overriding CLICKHOUSE_HTTP_BIND_ADDR.
+      - "${CLICKHOUSE_HTTP_BIND_ADDR:-127.0.0.1}:${CLICKHOUSE_HTTP_PORT:-8123}:8123"
     volumes:
       - ./.local/clickhouse:/var/lib/clickhouse
+    mem_limit: 2g
     healthcheck:
       test:
         - CMD-SHELL
@@ -41,10 +45,15 @@ services:
       LOGZZ_TELEGRAM__TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       LOGZZ_TELEGRAM__RESULTS_DIR: /app/.local/reports
       LOGZZ_TELEGRAM__MAX_RESULTS: ${LOGZZ_TELEGRAM_MAX_RESULTS:-50}
+      # Comma-separated telegram user ids allowed to use the search bot. Strongly
+      # recommended: without it, ANY telegram user who finds the bot can dump the full
+      # imported credential database. See README "Access control".
+      LOGZZ_TELEGRAM__ALLOWED_USER_IDS: ${LOGZZ_TELEGRAM_ALLOWED_USER_IDS:-}
       # LOGZZ_TELEGRAM__SOCKS: "socks5://127.0.0.1:1234"
     volumes:
       - ./.local:/app/.local
       - ./migrations:/app/migrations:ro
+    mem_limit: 1g
     restart: unless-stopped
 
   downloader:
@@ -62,12 +71,21 @@ services:
       DOWNLOADER_STATE_FILE: /app/.local/downloader/downloader.state.json
       DOWNLOADER_SESSION_FILE: /app/.local/downloader/downloader.session
       DOWNLOADER_POLL_INTERVAL_SECS: ${DOWNLOADER_POLL_INTERVAL_SECS:-5}
-      DOWNLOADER_REST_LISTEN_ADDR: ${DOWNLOADER_REST_LISTEN_ADDR:-0.0.0.0:8090}
+      # Always bind 0.0.0.0 inside the container so the host port mapping below can
+      # reach it; the host-side publish is what's restricted to loopback by default.
+      DOWNLOADER_REST_LISTEN_ADDR: 0.0.0.0:8090
       DOWNLOADER_API_ID: ${DOWNLOADER_API_ID:-}
       DOWNLOADER_API_HASH: ${DOWNLOADER_API_HASH:-}
+      # Bearer token required on /auth/* endpoints. Strongly recommended: without it,
+      # anyone who can reach this port can hijack the telegram login flow. See README.
+      DOWNLOADER_REST_API_TOKEN: ${DOWNLOADER_REST_API_TOKEN:-}
       # DOWNLOADER_TELEGRAM__SOCKS: "socks5://127.0.0.1:1234"
     ports:
-      - "${DOWNLOADER_REST_PORT:-8090}:8090"
+      # Bound to loopback by default; the /auth/* endpoints let whoever can reach them
+      # drive the telegram login flow. Use an SSH tunnel for remote access, or set
+      # DOWNLOADER_REST_BIND_ADDR plus DOWNLOADER_REST_API_TOKEN to expose it safely.
+      - "${DOWNLOADER_REST_BIND_ADDR:-127.0.0.1}:${DOWNLOADER_REST_PORT:-8090}:8090"
     volumes:
       - ./.local:/app/.local
+    mem_limit: 1g
     restart: unless-stopped

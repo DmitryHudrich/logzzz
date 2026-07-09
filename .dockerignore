@@ -1,7 +1,14 @@
 target/
 **/target/
 .local/
+**/.local/
 reports/
 test-files/
 test-files-test/
 .env
+.env.*
+**/*.session
+**/*.session-journal
+**/*.session-shm
+**/*.session-wal
+.git/

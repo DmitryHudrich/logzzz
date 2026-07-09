@@ -2,6 +2,20 @@
 **/input
 /reports
 /test-files
+
+# Runtime state, downloaded archives, telegram sessions — never commit these.
 **/.local/
-/.env
+*.session
+*.session-journal
+*.session-shm
+*.session-wal
+*.state.json
+*.pass
+*.needs-password
+*.logzz-upload.json
+
+# Secrets and machine-local config.
+.env
+.env.*
+!.env.example
 /config.yaml

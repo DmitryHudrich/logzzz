@@ -265,3 +265,95 @@ fn normalize_key(key: &str) -> String {
         other => other.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_key_maps_synonyms_and_cyrillic() {
+        assert_eq!(normalize_key("URL"), "url");
+        assert_eq!(normalize_key("Host"), "url");
+        assert_eq!(normalize_key("сайт"), "url");
+        assert_eq!(normalize_key("Login"), "username");
+        assert_eq!(normalize_key("логин"), "username");
+        assert_eq!(normalize_key("Pass"), "password");
+        assert_eq!(normalize_key("E-Mail"), "email");
+        assert_eq!(normalize_key("Ёж"), "еж");
+        assert_eq!(normalize_key("Some Other Field"), "someotherfield");
+    }
+
+    #[test]
+    fn looks_like_separator_detects_repeated_symbols_and_high_noise_ratio() {
+        let parser = Parser::new();
+        assert!(parser.looks_like_separator("-----------------"));
+        assert!(parser.looks_like_separator("================"));
+        assert!(parser.looks_like_separator("**###**###**###**"));
+        assert!(!parser.looks_like_separator("URL: https://example.com"));
+        assert!(!parser.looks_like_separator("hi"));
+    }
+
+    #[test]
+    fn looks_like_banner_line_detects_promo_text_and_multi_url_spam() {
+        let parser = Parser::new();
+        assert!(parser.looks_like_banner_line("!!! JOIN OUR CHANNEL @stealer_logs !!!"));
+        assert!(parser.looks_like_banner_line(
+            "visit https://a.example.com and https://b.example.com for more logs"
+        ));
+        assert!(!parser.looks_like_banner_line("Username: user@example.com"));
+    }
+
+    #[test]
+    fn parse_kv_line_extracts_key_value_and_rejects_banner_lines() {
+        let parser = Parser::new();
+        assert_eq!(
+            parser.parse_kv_line("URL: https://example.com"),
+            Some(("URL".to_string(), "https://example.com".to_string()))
+        );
+        assert_eq!(parser.parse_kv_line("Login: bob"), Some(("Login".to_string(), "bob".to_string())));
+        assert_eq!(parser.parse_kv_line("Join our channel: @spam"), None);
+        assert_eq!(parser.parse_kv_line("just some text"), None);
+    }
+
+    #[test]
+    fn parse_text_splits_multiple_records_separated_by_dashes() {
+        let parser = Parser::new();
+        let input = "\
+SOFT: StealerName
+URL: https://example.com
+Login: alice
+Password: hunter2
+-----------------------------------------
+URL: https://another.example.com
+Username: bob
+Password: correcthorse
+";
+        let report = parser.parse_text(input, "sample.txt");
+
+        assert_eq!(report.records.len(), 2);
+        assert_eq!(report.records[0].url.as_deref(), Some("https://example.com"));
+        assert_eq!(report.records[0].username.as_deref(), Some("alice"));
+        assert_eq!(report.records[0].password.as_deref(), Some("hunter2"));
+        assert_eq!(
+            report.records[1].url.as_deref(),
+            Some("https://another.example.com")
+        );
+        assert_eq!(report.records[1].username.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn parse_text_skips_leading_banner_noise() {
+        let parser = Parser::new();
+        let input = "\
+!!! JOIN OUR CHANNEL @stealer_logs !!!
+################################
+URL: https://example.com
+Username: alice
+Password: hunter2
+";
+        let report = parser.parse_text(input, "sample.txt");
+
+        assert_eq!(report.records.len(), 1);
+        assert_eq!(report.records[0].username.as_deref(), Some("alice"));
+    }
+}

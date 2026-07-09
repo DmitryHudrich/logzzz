@@ -78,24 +78,17 @@ pub async fn fetch_all_paths(
         return Ok(HashMap::new());
     }
 
-    let in_list: String = hashes
-        .iter()
-        .map(|h| format!("'{}'", h.replace('\'', "\\'")))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let sql = format!(
-        "SELECT file_hash, path FROM source_file_paths WHERE file_hash IN ({in_list}) ORDER BY file_hash, path",
-        in_list = in_list,
-    );
-
     #[derive(Debug, Deserialize, clickhouse::Row)]
     struct PathRow {
         file_hash: String,
         path: String,
     }
 
-    let rows = client.query(&sql).fetch_all::<PathRow>().await?;
+    let rows = client
+        .query("SELECT file_hash, path FROM source_file_paths WHERE file_hash IN ? ORDER BY file_hash, path")
+        .bind(hashes)
+        .fetch_all::<PathRow>()
+        .await?;
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
 
     for row in rows {

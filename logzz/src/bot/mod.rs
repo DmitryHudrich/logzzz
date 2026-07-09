@@ -18,6 +18,11 @@ pub async fn start_bot(state: BotState, bot: Bot) -> Result<()> {
     let state = Arc::new(state);
 
     let handler = dptree::entry()
+        .filter(|update: Update, state: Arc<BotState>| {
+            update
+                .from()
+                .is_some_and(|user| state.is_user_allowed(user.id.0 as i64))
+        })
         .branch(
             Update::filter_message()
                 .filter_command::<Command>()

@@ -27,11 +27,20 @@ async fn main() -> Result<()> {
             .with_database(&cfg.clickhouse.database),
     );
 
+    if cfg.telegram.allowed_user_ids.is_empty() {
+        warn!(
+            "LOGZZ_TELEGRAM__ALLOWED_USER_IDS is not set; the search bot will respond to ANY \
+             telegram user, exposing the full imported credential database. Set it to a \
+             comma-separated list of trusted telegram user ids to restrict access."
+        );
+    }
+
     let state = BotState::new(
         client,
         cfg.telegram.results_dir.clone(),
         cfg.input_dir.clone(),
         cfg.archive_dir.clone(),
+        cfg.telegram.allowed_user_ids.clone(),
     );
     let telegram_bot = if cfg.telegram.token.is_empty() {
         None
@@ -39,7 +48,7 @@ async fn main() -> Result<()> {
         Some({
             let client = if let Some(proxy) = cfg.socks_proxy {
                 default_reqwest_settings()
-                    .proxy(reqwest::Proxy::all(dbg!(&proxy))?)
+                    .proxy(reqwest::Proxy::all(&proxy)?)
                     .build()?
             } else {
                 default_reqwest_settings().build()?
