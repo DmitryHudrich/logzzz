@@ -139,7 +139,7 @@ moralis:
 
 trongrid:
   enabled: true
-  base_url: "https://api.trongrid.io"
+  base_url: "https://apilist.tronscanapi.com"
   api_key: ~
   page_ttl_secs: 3600
   page_max_capacity: 10000

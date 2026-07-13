@@ -1,37 +1,90 @@
 use serde::Deserialize;
 
-#[derive(Deserialize, Debug)]
-pub struct Trc20Response {
+#[derive(Deserialize, Debug, Default)]
+pub struct TransactionListResponse {
     #[serde(default)]
-    data: Vec<Trc20Transfer>,
-    #[serde(default)]
-    meta: Option<Meta>,
-    #[serde(default)]
-    success: Option<bool>,
+    data: Vec<RawTransaction>,
 }
 
-impl Trc20Response {
-    /// Consume the response and return (data, meta).
-    pub fn into_parts(self) -> (Vec<Trc20Transfer>, Option<Meta>) {
-        (self.data, self.meta)
+impl TransactionListResponse {
+    pub fn into_data(self) -> Vec<RawTransaction> {
+        self.data
+    }
+}
+
+#[derive(Deserialize, Debug)]
+pub struct RawTransaction {
+    hash: String,
+    timestamp: i64,
+    #[serde(rename = "ownerAddress")]
+    owner_address: String,
+    #[serde(rename = "toAddress", default)]
+    to_address: Option<String>,
+    #[serde(rename = "contractType")]
+    contract_type: i64,
+    #[serde(rename = "contractRet", default)]
+    contract_ret: Option<String>,
+    #[serde(default)]
+    amount: Option<String>,
+}
+
+/// Tron's `TransferContract` type id — the only native-TRX contract kind
+/// that represents a value transfer (see `wallet/broadcasttransaction`
+/// protobuf `Transaction.Contract.ContractType`).
+pub const TRANSFER_CONTRACT_TYPE: i64 = 1;
+
+impl RawTransaction {
+    pub fn hash(&self) -> &str {
+        &self.hash
     }
 
-    pub fn success(&self) -> Option<bool> {
-        self.success
+    pub fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+
+    pub fn owner_address(&self) -> &str {
+        &self.owner_address
+    }
+
+    pub fn to_address(&self) -> Option<&str> {
+        self.to_address.as_deref()
+    }
+
+    pub fn contract_type(&self) -> i64 {
+        self.contract_type
+    }
+
+    pub fn contract_ret(&self) -> Option<&str> {
+        self.contract_ret.as_deref()
+    }
+
+    pub fn amount(&self) -> Option<&str> {
+        self.amount.as_deref()
+    }
+}
+
+#[derive(Deserialize, Debug, Default)]
+pub struct Trc20TransferListResponse {
+    #[serde(default, rename = "token_transfers")]
+    token_transfers: Vec<Trc20Transfer>,
+}
+
+impl Trc20TransferListResponse {
+    pub fn into_transfers(self) -> Vec<Trc20Transfer> {
+        self.token_transfers
     }
 }
 
 #[derive(Deserialize, Debug)]
 pub struct Trc20Transfer {
     transaction_id: String,
-    token_info: TokenInfo,
-    block_timestamp: i64,
-    from: String,
-    to: String,
-    value: String,
-    #[serde(rename = "type")]
-    #[serde(default)]
-    kind: Option<String>,
+    block_ts: i64,
+    from_address: String,
+    to_address: String,
+    contract_address: String,
+    quant: String,
+    #[serde(default, rename = "tokenInfo")]
+    token_info: Trc20TokenInfo,
 }
 
 impl Trc20Transfer {
@@ -39,180 +92,102 @@ impl Trc20Transfer {
         &self.transaction_id
     }
 
-    pub fn token_info(&self) -> &TokenInfo {
-        &self.token_info
+    pub fn block_ts(&self) -> i64 {
+        self.block_ts
     }
 
-    pub fn block_timestamp(&self) -> i64 {
-        self.block_timestamp
-    }
-
-    pub fn from(&self) -> &str {
-        &self.from
-    }
-
-    pub fn to(&self) -> &str {
-        &self.to
-    }
-
-    pub fn value(&self) -> &str {
-        &self.value
-    }
-
-    pub fn kind(&self) -> Option<&str> {
-        self.kind.as_deref()
-    }
-}
-
-#[derive(Deserialize, Debug)]
-pub struct TokenInfo {
-    symbol: String,
-    address: String,
-    decimals: u8,
-    name: String,
-}
-
-impl TokenInfo {
-    pub fn symbol(&self) -> &str {
-        &self.symbol
-    }
-
-    pub fn address(&self) -> &str {
-        &self.address
-    }
-
-    pub fn decimals(&self) -> u8 {
-        self.decimals
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-}
-
-#[derive(Deserialize, Debug)]
-pub struct NativeTxResponse {
-    #[serde(default)]
-    data: Vec<RawTransaction>,
-    #[serde(default)]
-    meta: Option<Meta>,
-}
-
-impl NativeTxResponse {
-    /// Consume the response and return (data, meta).
-    pub fn into_parts(self) -> (Vec<RawTransaction>, Option<Meta>) {
-        (self.data, self.meta)
-    }
-}
-
-#[derive(Deserialize, Debug)]
-pub struct RawTransaction {
-    #[serde(rename = "txID")]
-    tx_id: String,
-    block_timestamp: i64,
-    #[serde(default)]
-    ret: Option<Vec<Ret>>,
-    raw_data: RawData,
-}
-
-impl RawTransaction {
-    pub fn tx_id(&self) -> &str {
-        &self.tx_id
-    }
-
-    pub fn block_timestamp(&self) -> i64 {
-        self.block_timestamp
-    }
-
-    pub fn ret(&self) -> Option<&[Ret]> {
-        self.ret.as_deref()
-    }
-
-    pub fn into_raw_data(self) -> RawData {
-        self.raw_data
-    }
-}
-
-#[derive(Deserialize, Debug)]
-pub struct Ret {
-    #[serde(rename = "contractRet")]
-    contract_ret: Option<String>,
-}
-
-impl Ret {
-    pub fn contract_ret(&self) -> Option<&str> {
-        self.contract_ret.as_deref()
-    }
-}
-
-#[derive(Deserialize, Debug)]
-pub struct RawData {
-    contract: Vec<Contract>,
-}
-
-impl RawData {
-    pub fn into_contracts(self) -> Vec<Contract> {
-        self.contract
-    }
-}
-
-#[derive(Deserialize, Debug)]
-pub struct Contract {
-    #[serde(rename = "type")]
-    contract_type: String,
-    parameter: Parameter,
-}
-
-impl Contract {
-    pub fn contract_type(&self) -> &str {
-        &self.contract_type
-    }
-
-    pub fn into_parameter(self) -> Parameter {
-        self.parameter
-    }
-}
-
-#[derive(Deserialize, Debug)]
-pub struct Parameter {
-    value: serde_json::Value,
-}
-
-impl Parameter {
-    pub fn into_value(self) -> serde_json::Value {
-        self.value
-    }
-}
-
-#[derive(Deserialize, Debug)]
-pub struct Meta {
-    #[serde(default)]
-    fingerprint: Option<String>,
-}
-
-impl Meta {
-    pub fn fingerprint(self) -> Option<String> {
-        self.fingerprint
-    }
-}
-
-#[derive(Deserialize, Debug)]
-pub struct TransferContractValue {
-    pub amount: u128,
-    pub owner_address: String,
-    pub to_address: String,
-}
-
-impl TransferContractValue {
-    pub fn amount(&self) -> u128 {
-        self.amount
-    }
-
-    pub fn owner_address(&self) -> &str {
-        &self.owner_address
+    pub fn from_address(&self) -> &str {
+        &self.from_address
     }
 
     pub fn to_address(&self) -> &str {
         &self.to_address
+    }
+
+    pub fn contract_address(&self) -> &str {
+        &self.contract_address
+    }
+
+    pub fn quant(&self) -> &str {
+        &self.quant
+    }
+
+    pub fn token_info(&self) -> &Trc20TokenInfo {
+        &self.token_info
+    }
+}
+
+/// Tronscan only populates `tokenInfo` for tokens it has indexed metadata
+/// for (its "vip"/whitelisted set, which covers USDT, USDC, WTRX and other
+/// tokens that matter for tracing). For obscure/unlisted contracts this
+/// comes back as `{}` — every field absent — and there is no other Tronscan
+/// endpoint that reliably resolves decimals by contract address, so callers
+/// must treat a `None` `token_decimal` as "cannot normalize this transfer".
+#[derive(Deserialize, Debug, Default)]
+pub struct Trc20TokenInfo {
+    #[serde(default, rename = "tokenAbbr")]
+    token_abbr: Option<String>,
+    #[serde(default, rename = "tokenDecimal")]
+    token_decimal: Option<u8>,
+}
+
+impl Trc20TokenInfo {
+    pub fn token_abbr(&self) -> Option<&str> {
+        self.token_abbr.as_deref()
+    }
+
+    pub fn token_decimal(&self) -> Option<u8> {
+        self.token_decimal
+    }
+}
+
+/// `/api/account` response, trimmed to the fields this source needs:
+/// `accountType == 2` marks a smart contract, and `addressTag`/
+/// `addressTagLogo` carry Tronscan's curated public label for the address
+/// (e.g. "Binance-Cold 2"), when it has one.
+#[derive(Deserialize, Debug, Default)]
+pub struct AccountInfo {
+    #[serde(default, rename = "accountType")]
+    account_type: i64,
+    #[serde(default, rename = "addressTag")]
+    address_tag: Option<String>,
+    #[serde(default, rename = "addressTagLogo")]
+    address_tag_logo: Option<String>,
+}
+
+impl AccountInfo {
+    pub fn is_contract(&self) -> bool {
+        self.account_type == 2
+    }
+
+    /// Curated public tag name, or `None` if Tronscan has no label for this
+    /// address (absent from the response, or present but blank).
+    pub fn address_tag(&self) -> Option<&str> {
+        self.address_tag.as_deref().filter(|s| !s.is_empty())
+    }
+
+    pub fn address_tag_logo(&self) -> Option<&str> {
+        self.address_tag_logo.as_deref().filter(|s| !s.is_empty())
+    }
+}
+
+#[derive(Deserialize, Debug)]
+pub struct LatestBlock {
+    number: u64,
+    hash: String,
+    timestamp: i64,
+}
+
+impl LatestBlock {
+    pub fn number(&self) -> u64 {
+        self.number
+    }
+
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+
+    pub fn timestamp(&self) -> i64 {
+        self.timestamp
     }
 }

@@ -204,7 +204,7 @@ impl TronGridConfigFile {
     }
 
     fn default_base_url() -> String {
-        "https://api.trongrid.io".into()
+        "https://apilist.tronscanapi.com".into()
     }
     fn default_page_ttl_secs() -> u64 {
         3_600
