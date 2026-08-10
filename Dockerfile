@@ -6,8 +6,13 @@ RUN cargo build --release -p logzz -p downloader
 
 FROM debian:bookworm-slim
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates p7zip-full \
+# `unrar` (RARLAB, non-free) reliably handles RAR3 and RAR5; p7zip's bundled RAR codec
+# chokes on RAR5, so it is kept only as a secondary extractor. Enabling `non-free` is
+# required to pull `unrar` on Debian bookworm.
+RUN echo 'deb http://deb.debian.org/debian bookworm non-free non-free-firmware' \
+        > /etc/apt/sources.list.d/nonfree.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates p7zip-full unrar \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 1000 logzz \
     && useradd --system --uid 1000 --gid logzz --no-create-home --shell /usr/sbin/nologin logzz

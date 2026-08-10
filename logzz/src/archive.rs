@@ -1,10 +1,15 @@
 use std::fs as sfs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_ARCHIVE_DIR: &str = "./.local/archives";
+
+/// External command-line tools that can extract RAR archives, in the order they are
+/// tried. ZIP is handled in-process by the `zip` crate and needs no external software.
+/// The first tool that succeeds wins; if one is missing or fails, the next is tried.
+const RAR_EXTRACTORS: &[&str] = &["7z", "unrar"];
 pub const PARTIAL_SUFFIX: &str = ".part";
 pub const ARCHIVE_PASSWORD_SUFFIX: &str = ".pass";
 pub const ARCHIVE_NEEDS_PASSWORD_SUFFIX: &str = ".needs-password";
@@ -310,6 +315,18 @@ fn copy_limited<R: io::Read, W: io::Write>(
     Ok(copied)
 }
 
+/// Outcome of running a single external extractor against a RAR archive.
+enum ExtractorRun {
+    /// The tool ran and reported success; files are on disk.
+    Extracted,
+    /// The tool reported that the archive is encrypted / needs a password.
+    PasswordRequired,
+    /// The tool ran but exited non-zero for some other reason (carries a message).
+    Failed(String),
+    /// The tool binary is not installed on this system.
+    NotInstalled,
+}
+
 fn extract_rar(
     archive_path: &Path,
     output_dir: &Path,
@@ -317,53 +334,121 @@ fn extract_rar(
 ) -> Result<ExtractStats, ExtractError> {
     sfs::create_dir_all(output_dir).map_err(|e| ExtractError::Failed(e.to_string()))?;
 
-    let mut cmd_7z = Command::new("7z");
-    cmd_7z.arg("x").arg("-y");
-    if let Some(pwd) = password {
-        cmd_7z.arg(format!("-p{pwd}"));
+    let mut ran_any = false;
+    let mut last_failure: Option<String> = None;
+
+    // Try each known extractor in turn. A tool that is missing is skipped; a tool that
+    // runs but fails (e.g. 7z's old codec choking on RAR5) falls through to the next one,
+    // instead of dead-ending the whole archive as the previous single-tool path did.
+    for tool in RAR_EXTRACTORS {
+        match run_rar_extractor(tool, archive_path, output_dir, password) {
+            ExtractorRun::Extracted => return finalize_rar_extraction(output_dir),
+            ExtractorRun::PasswordRequired => return Err(ExtractError::PasswordRequired),
+            ExtractorRun::Failed(message) => {
+                ran_any = true;
+                last_failure = Some(message);
+                // Wipe any partial output before the next extractor retries into the same dir.
+                let _ = sfs::remove_dir_all(output_dir);
+                sfs::create_dir_all(output_dir)
+                    .map_err(|e| ExtractError::Failed(e.to_string()))?;
+            }
+            ExtractorRun::NotInstalled => {}
+        }
     }
-    cmd_7z
-        .arg(format!("-o{}", output_dir.display()))
-        .arg(archive_path);
 
-    let output = match cmd_7z.output() {
-        Ok(out) => out,
-        Err(_) => {
-            let mut cmd_unrar = Command::new("unrar");
-            cmd_unrar.arg("x").arg("-y").arg("-o+");
-            if let Some(pwd) = password {
-                cmd_unrar.arg(format!("-p{pwd}"));
-            }
-            cmd_unrar.arg("-inul").arg(archive_path).arg(output_dir);
-            cmd_unrar.output().map_err(|e| {
-                ExtractError::Failed(format!(
-                    "Failed to run `7z` or `unrar`: {e}. Is an extractor installed?"
-                ))
-            })?
-        }
-    };
-
-    if !output.status.success() {
-        let combined = format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        if password.is_none() {
-            let lower = combined.to_lowercase();
-            if lower.contains("wrong password")
-                || lower.contains("encrypted")
-                || lower.contains("enter password")
-            {
-                return Err(ExtractError::PasswordRequired);
-            }
-        }
-        let code = output.status.code().unwrap_or(-1);
+    if !ran_any {
         return Err(ExtractError::Failed(format!(
-            "RAR extractor exited with code {code}"
+            "no RAR extractor found; install one of: {}",
+            RAR_EXTRACTORS.join(", ")
         )));
     }
 
+    Err(ExtractError::Failed(
+        last_failure.unwrap_or_else(|| "RAR extraction failed".to_string()),
+    ))
+}
+
+/// Runs a single external RAR extractor and classifies the result.
+fn run_rar_extractor(
+    tool: &str,
+    archive_path: &Path,
+    output_dir: &Path,
+    password: Option<&str>,
+) -> ExtractorRun {
+    let mut cmd = Command::new(tool);
+    match tool {
+        "7z" => {
+            cmd.arg("x").arg("-y");
+            match password {
+                Some(pwd) => {
+                    cmd.arg(format!("-p{pwd}"));
+                }
+                // Empty `-p` so an encrypted archive fails fast instead of blocking on a
+                // password prompt in a daemon that has no interactive stdin.
+                None => {
+                    cmd.arg("-p");
+                }
+            }
+            cmd.arg(format!("-o{}", output_dir.display()))
+                .arg(archive_path);
+        }
+        "unrar" => {
+            cmd.arg("x").arg("-y").arg("-o+");
+            match password {
+                Some(pwd) => {
+                    cmd.arg(format!("-p{pwd}"));
+                }
+                // `-p-` disables the interactive password prompt, same rationale as above.
+                None => {
+                    cmd.arg("-p-");
+                }
+            }
+            cmd.arg("-inul").arg(archive_path).arg(output_dir);
+        }
+        other => return ExtractorRun::Failed(format!("unknown RAR extractor: {other}")),
+    }
+
+    // Detach stdin so no extractor can hang the daemon waiting on an interactive prompt.
+    cmd.stdin(Stdio::null());
+
+    let output = match cmd.output() {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return ExtractorRun::NotInstalled,
+        Err(error) => return ExtractorRun::Failed(format!("failed to run `{tool}`: {error}")),
+    };
+
+    if output.status.success() {
+        return ExtractorRun::Extracted;
+    }
+
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Only classify as "needs password" when the caller supplied none: a supplied-but-wrong
+    // password is a hard failure, not a prompt to keep waiting for a password file.
+    if password.is_none() {
+        let lower = combined.to_lowercase();
+        if lower.contains("wrong password")
+            || lower.contains("encrypted")
+            || lower.contains("enter password")
+            || lower.contains("password incorrect")
+        {
+            return ExtractorRun::PasswordRequired;
+        }
+    }
+
+    let code = output.status.code().unwrap_or(-1);
+    ExtractorRun::Failed(format!("`{tool}` exited with code {code}"))
+}
+
+/// Walks the extracted output to count files and enforce the zip/rar-bomb guards.
+///
+/// 7z/unrar already wrote the files to disk by the time we can inspect them, so this is a
+/// post-hoc guard rather than a preventive one: it stops a runaway extraction from being
+/// imported and leaves the oversized output cleaned up.
+fn finalize_rar_extraction(output_dir: &Path) -> Result<ExtractStats, ExtractError> {
     let mut count = 0usize;
     let mut total_bytes = 0u64;
     for entry in walkdir::WalkDir::new(output_dir)
@@ -375,9 +460,6 @@ fn extract_rar(
         total_bytes += entry.metadata().map(|meta| meta.len()).unwrap_or(0);
     }
 
-    // 7z/unrar already wrote the files to disk by the time we can inspect them, so this
-    // is a post-hoc guard against zip/rar bombs rather than a preventive one: it stops a
-    // runaway extraction from being imported and leaves the oversized output cleaned up.
     if count > MAX_EXTRACTED_ENTRIES {
         let _ = sfs::remove_dir_all(output_dir);
         return Err(ExtractError::TooManyEntries);
@@ -391,6 +473,53 @@ fn extract_rar(
         files_extracted: count,
         output_dir: output_dir.to_path_buf(),
     })
+}
+
+/// Which archive formats can actually be extracted on this system, based on the tools
+/// currently installed. ZIP is always supported because it is handled in-process.
+#[derive(Debug, Clone)]
+pub struct ExtractorAvailability {
+    /// External RAR extractors from [`RAR_EXTRACTORS`] that were found on `PATH`.
+    pub rar_tools: Vec<String>,
+}
+
+impl ExtractorAvailability {
+    /// ZIP is always supported: extraction is done in-process by the `zip` crate.
+    pub fn zip_supported(&self) -> bool {
+        true
+    }
+
+    /// RAR needs at least one external extractor to be installed.
+    pub fn rar_supported(&self) -> bool {
+        !self.rar_tools.is_empty()
+    }
+}
+
+/// Probes the system for the external software required to extract each supported archive
+/// format, so callers can warn loudly at startup instead of silently failing per-archive.
+pub fn check_extractors() -> ExtractorAvailability {
+    let rar_tools = RAR_EXTRACTORS
+        .iter()
+        .filter(|tool| is_command_available(tool))
+        .map(|tool| tool.to_string())
+        .collect();
+    ExtractorAvailability { rar_tools }
+}
+
+/// Returns true if `tool` can be executed. `--help` is understood by both `7z` and
+/// `unrar`, exits immediately, and touches no files; only a `NotFound` error (binary
+/// absent) counts as unavailable — any other outcome means the binary is present.
+fn is_command_available(tool: &str) -> bool {
+    match Command::new(tool)
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(_) => true,
+        Err(error) => error.kind() != io::ErrorKind::NotFound,
+    }
 }
 
 #[cfg(test)]

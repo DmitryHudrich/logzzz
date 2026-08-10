@@ -76,6 +76,20 @@ pub async fn start(
     fs::create_dir_all(&input_dir).await?;
     fs::create_dir_all(&archive_dir).await?;
 
+    let extractors = crate::archive::check_extractors();
+    if extractors.rar_supported() {
+        info!(
+            rar_extractors = ?extractors.rar_tools,
+            "archive extractors detected (zip: in-process, rar: external)"
+        );
+    } else {
+        warn!(
+            "no RAR extractor found on PATH; .rar archives cannot be extracted and will keep \
+             failing on every retry. Install `unrar` or `7z` (p7zip-full). ZIP archives are \
+             still supported."
+        );
+    }
+
     info!(
         input_dir = %input_dir.display(),
         archive_dir = %archive_dir.display(),
