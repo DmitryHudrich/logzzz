@@ -87,6 +87,11 @@ jobs:
           script: |
             set -eu
 
+            echo "==> checking prerequisites"
+            command -v docker >/dev/null 2>&1 || { echo "ERROR: docker is not installed on the server"; exit 1; }
+            docker version >/dev/null 2>&1 || { echo "ERROR: cannot talk to the docker daemon (is dockerd running, and is $USER in the 'docker' group?)"; exit 1; }
+            docker compose version >/dev/null 2>&1 || { echo "ERROR: 'docker compose' v2 plugin is missing (install docker-compose-plugin)"; exit 1; }
+
             IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
             REGISTRY="${{ env.REGISTRY }}"
             IMAGE_NAME_LC="$(echo '${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')"
@@ -96,7 +101,10 @@ jobs:
             GHCR_TOKEN="${{ secrets.GHCR_PULL_TOKEN }}"
 
             DEPLOY_PATH="${{ vars.DEPLOY_PATH }}"
+            [ -n "$DEPLOY_PATH" ] || { echo "ERROR: repo Variable DEPLOY_PATH is empty — set it (e.g. /opt/logzzz)"; exit 1; }
+            mkdir -p "$DEPLOY_PATH"
             cd "$DEPLOY_PATH"
+            echo "==> deploying in $DEPLOY_PATH"
 
             # Authenticate to GHCR so `docker compose pull` can fetch a private image.
             # Skip when no token is provided: a public GHCR package needs no login, and an
@@ -135,6 +143,10 @@ jobs:
             append_if_set DOWNLOADER_PEER_NAME "$DOWNLOADER_PEER_NAME"
             [ -n "$DOWNLOADER_PEER_NAME" ] && echo "COMPOSE_PROFILES=downloader" >> .env || true
 
+            echo "==> pulling images"
             docker compose -f docker-compose.prod.yml pull
+            echo "==> starting services"
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
+            echo "==> deploy done"
+            docker compose -f docker-compose.prod.yml ps
