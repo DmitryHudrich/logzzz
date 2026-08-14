@@ -98,8 +98,15 @@ jobs:
             DEPLOY_PATH="${{ vars.DEPLOY_PATH }}"
             cd "$DEPLOY_PATH"
 
-            # Authenticate to GHCR so `docker compose pull` can fetch the (private) image.
-            echo "$GHCR_TOKEN" | docker login "$REGISTRY" -u "$GHCR_USER" --password-stdin
+            # Authenticate to GHCR so `docker compose pull` can fetch a private image.
+            # Skip when no token is provided: a public GHCR package needs no login, and an
+            # empty --password-stdin would otherwise drop docker into an interactive prompt
+            # and fail on the non-TTY runner.
+            if [ -n "$GHCR_TOKEN" ]; then
+              echo "$GHCR_TOKEN" | docker login "$REGISTRY" -u "$GHCR_USER" --password-stdin
+            else
+              echo "GHCR_PULL_TOKEN not set — skipping docker login (image must be public)."
+            fi
 
             # Render .env with restrictive perms — this holds the ClickHouse password, bot
             # token and telegram api credentials. IMAGE/IMAGE_TAG and the access-control
