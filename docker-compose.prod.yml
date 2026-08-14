@@ -52,6 +52,9 @@ services:
 
   downloader:
     image: ${IMAGE:-ghcr.io/dmitryhudrich/logzzz}:${IMAGE_TAG:-latest}
+    # Only starts when the `downloader` profile is active (COMPOSE_PROFILES=downloader),
+    # which deploy enables solely when DOWNLOADER_PEER_NAME is set. No peer -> no service.
+    profiles: ["downloader"]
     depends_on:
       clickhouse:
         condition: service_healthy

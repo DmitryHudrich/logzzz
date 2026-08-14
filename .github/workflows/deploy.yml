@@ -71,7 +71,7 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
-          port: ${{ secrets.SSH_PORT }}
+          port: ${{ vars.SSH_PORT || 22 }}
           source: docker-compose.prod.yml
           target: ${{ vars.DEPLOY_PATH }}
           overwrite: true
@@ -82,7 +82,7 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
-          port: ${{ secrets.SSH_PORT }}
+          port: ${{ vars.SSH_PORT || 22 }}
           script_stop: true
           script: |
             set -eu
@@ -114,7 +114,6 @@ jobs:
               echo "TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}"
               echo "LOGZZ_TELEGRAM_ALLOWED_USER_IDS=${{ secrets.LOGZZ_TELEGRAM_ALLOWED_USER_IDS }}"
               echo "DOWNLOADER_REST_API_TOKEN=${{ secrets.DOWNLOADER_REST_API_TOKEN }}"
-              echo "DOWNLOADER_PEER_NAME=${{ secrets.DOWNLOADER_PEER_NAME }}"
             } > .env
 
             # Only override when the secret is non-empty; otherwise the compose default wins.
@@ -122,6 +121,12 @@ jobs:
             append_if_set CLICKHOUSE_PASSWORD '${{ secrets.CLICKHOUSE_PASSWORD }}'
             append_if_set DOWNLOADER_API_ID '${{ secrets.DOWNLOADER_API_ID }}'
             append_if_set DOWNLOADER_API_HASH '${{ secrets.DOWNLOADER_API_HASH }}'
+
+            # DOWNLOADER_PEER_NAME is optional: only when it's set do we write it and
+            # activate the `downloader` compose profile so that service comes up.
+            DOWNLOADER_PEER_NAME='${{ secrets.DOWNLOADER_PEER_NAME }}'
+            append_if_set DOWNLOADER_PEER_NAME "$DOWNLOADER_PEER_NAME"
+            [ -n "$DOWNLOADER_PEER_NAME" ] && echo "COMPOSE_PROFILES=downloader" >> .env || true
 
             docker compose -f docker-compose.prod.yml pull
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
