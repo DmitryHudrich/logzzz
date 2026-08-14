@@ -8,9 +8,11 @@ FROM debian:bookworm-slim
 
 # `unrar` (RARLAB, non-free) reliably handles RAR3 and RAR5; p7zip's bundled RAR codec
 # chokes on RAR5, so it is kept only as a secondary extractor. Enabling `non-free` is
-# required to pull `unrar` on Debian bookworm.
-RUN echo 'deb http://deb.debian.org/debian bookworm non-free non-free-firmware' \
-        > /etc/apt/sources.list.d/nonfree.list \
+# required to pull `unrar` on Debian bookworm. bookworm-slim ships the deb822
+# `debian.sources` (with Signed-By), so add the components there instead of dropping a
+# one-line list for the same origin, which apt rejects as a Signed-By conflict.
+RUN sed -i 's/^Components: main$/Components: main non-free non-free-firmware/' \
+        /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates p7zip-full unrar \
     && rm -rf /var/lib/apt/lists/* \
