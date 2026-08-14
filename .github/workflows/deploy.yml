@@ -1,0 +1,128 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # Never run two deploys against the server at once; cancel superseded builds.
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  # ghcr repository names must be lowercase; the GitHub repo is DmitryHudrich/logzzz.
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    name: Build & push image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lowercase image name
+        id: meta
+        run: |
+          echo "image=${REGISTRY}/${IMAGE_NAME,,}" >>"$GITHUB_OUTPUT"
+          echo "image_tag=sha-${GITHUB_SHA::12}" >>"$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to server
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Copy compose file to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          source: docker-compose.prod.yml
+          target: ${{ vars.DEPLOY_PATH }}
+          overwrite: true
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script_stop: true
+          script: |
+            set -eu
+
+            IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
+            REGISTRY="${{ env.REGISTRY }}"
+            IMAGE_NAME_LC="$(echo '${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')"
+            IMAGE="${REGISTRY}/${IMAGE_NAME_LC}"
+
+            GHCR_USER="${{ github.actor }}"
+            GHCR_TOKEN="${{ secrets.GHCR_PULL_TOKEN }}"
+
+            DEPLOY_PATH="${{ vars.DEPLOY_PATH }}"
+            cd "$DEPLOY_PATH"
+
+            # Authenticate to GHCR so `docker compose pull` can fetch the (private) image.
+            echo "$GHCR_TOKEN" | docker login "$REGISTRY" -u "$GHCR_USER" --password-stdin
+
+            # Render .env with restrictive perms — this holds the ClickHouse password, bot
+            # token and telegram api credentials. IMAGE/IMAGE_TAG and the access-control
+            # values are always written; secrets that have a safe default in
+            # docker-compose.prod.yml (ClickHouse password, telegram api_id/hash) are only
+            # written when the corresponding GitHub secret is set, so leaving the secret
+            # empty falls back to the compose default (`${VAR:-default}`).
+            umask 077
+            {
+              echo "IMAGE=${IMAGE}"
+              echo "IMAGE_TAG=${IMAGE_TAG}"
+              echo "TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}"
+              echo "LOGZZ_TELEGRAM_ALLOWED_USER_IDS=${{ secrets.LOGZZ_TELEGRAM_ALLOWED_USER_IDS }}"
+              echo "DOWNLOADER_REST_API_TOKEN=${{ secrets.DOWNLOADER_REST_API_TOKEN }}"
+              echo "DOWNLOADER_PEER_NAME=${{ secrets.DOWNLOADER_PEER_NAME }}"
+            } > .env
+
+            # Only override when the secret is non-empty; otherwise the compose default wins.
+            append_if_set() { [ -n "$2" ] && printf '%s=%s\n' "$1" "$2" >> .env || true; }
+            append_if_set CLICKHOUSE_PASSWORD '${{ secrets.CLICKHOUSE_PASSWORD }}'
+            append_if_set DOWNLOADER_API_ID '${{ secrets.DOWNLOADER_API_ID }}'
+            append_if_set DOWNLOADER_API_HASH '${{ secrets.DOWNLOADER_API_HASH }}'
+
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+            docker image prune -f
