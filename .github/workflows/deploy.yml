@@ -111,9 +111,13 @@ jobs:
             # empty --password-stdin would otherwise drop docker into an interactive prompt
             # and fail on the non-TTY runner.
             if [ -n "$GHCR_TOKEN" ]; then
-              echo "$GHCR_TOKEN" | docker login "$REGISTRY" -u "$GHCR_USER" --password-stdin
+              echo "==> docker login to $REGISTRY as $GHCR_USER"
+              if ! printf '%s' "$GHCR_TOKEN" | docker login "$REGISTRY" -u "$GHCR_USER" --password-stdin; then
+                echo "ERROR: docker login to $REGISTRY failed — GHCR_PULL_TOKEN must be a token with read:packages (classic PAT works most reliably) that can read this package"
+                exit 1
+              fi
             else
-              echo "GHCR_PULL_TOKEN not set — skipping docker login (image must be public)."
+              echo "==> GHCR_PULL_TOKEN not set — skipping docker login (image must be public)."
             fi
 
             # Render .env with restrictive perms — this holds the ClickHouse password, bot
@@ -144,7 +148,10 @@ jobs:
             [ -n "$DOWNLOADER_PEER_NAME" ] && echo "COMPOSE_PROFILES=downloader" >> .env || true
 
             echo "==> pulling images"
-            docker compose -f docker-compose.prod.yml pull
+            if ! docker compose -f docker-compose.prod.yml pull; then
+              echo "ERROR: 'docker compose pull' failed — if the GHCR package is private, set GHCR_PULL_TOKEN; if public, make sure the package visibility is Public"
+              exit 1
+            fi
             echo "==> starting services"
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
