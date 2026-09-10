@@ -7,6 +7,7 @@ use tokio::fs;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+use crate::application::events::{AppEvent, EventBus};
 use crate::domain::parser::parse_file;
 use crate::domain::record::{AccountRecord, FileHash};
 use crate::domain::repository::{CredentialRepository, SourceFilePathRecord, SourceFileRecord};
@@ -16,10 +17,10 @@ use crate::infrastructure::archive::{
 };
 use crate::infrastructure::files::{file_hash, iter_files};
 use crate::infrastructure::telegram_ipc::{
-    ArchiveParseSummary, archive_path_from_upload_request, load_pending_notifications,
-    load_upload_request, load_upload_request_file, queue_pending_parse_notification,
-    remove_needs_password_marker, remove_upload_request, save_pending_notification,
-    write_needs_password_marker,
+    ArchiveParseSummary, ArchiveUploadRequest, archive_path_from_upload_request,
+    load_pending_notifications, load_upload_request, load_upload_request_file,
+    queue_pending_parse_notification, remove_needs_password_marker, remove_upload_request,
+    save_pending_notification, write_needs_password_marker,
 };
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -83,11 +84,21 @@ struct DedupState {
     seen_paths: HashMap<PathBuf, HashSet<FileHash>>,
 }
 
+struct ArchiveAgg {
+    name: String,
+    output_dir: PathBuf,
+    files_extracted: usize,
+    files_parsed: usize,
+    records_inserted: usize,
+    issues_found: usize,
+}
+
 pub struct IngestService {
     repo: Arc<dyn CredentialRepository>,
     input_dir: PathBuf,
     archive_dir: PathBuf,
     status: SharedImportStatus,
+    events: EventBus,
     dedup: Mutex<Option<DedupState>>,
 }
 
@@ -97,12 +108,14 @@ impl IngestService {
         input_dir: impl Into<PathBuf>,
         archive_dir: impl Into<PathBuf>,
         status: SharedImportStatus,
+        events: EventBus,
     ) -> Self {
         Self {
             repo,
             input_dir: input_dir.into(),
             archive_dir: archive_dir.into(),
             status,
+            events,
             dedup: Mutex::new(None),
         }
     }
@@ -118,6 +131,8 @@ impl IngestService {
             Err(error) => {
                 let mut status = self.status.lock().await;
                 status.last_error = Some(error.to_string());
+                drop(status);
+                self.events.emit(AppEvent::problem(error.to_string()));
             }
         }
         stats
@@ -142,9 +157,22 @@ impl IngestService {
 
         recover_orphaned_upload_requests(&self.archive_dir, &self.input_dir).await?;
 
-        let extracted_paths =
-            process_pending_archives(&self.archive_dir, &self.input_dir).await?;
-        stats.archives_extracted = extracted_paths.len();
+        let extracted =
+            process_pending_archives(&self.archive_dir, &self.input_dir, &self.events).await?;
+        stats.archives_extracted = extracted.len();
+        let extracted_paths: Vec<PathBuf> =
+            extracted.iter().map(|e| e.output_dir.clone()).collect();
+        let mut arch_agg: Vec<ArchiveAgg> = extracted
+            .into_iter()
+            .map(|e| ArchiveAgg {
+                name: e.name,
+                output_dir: e.output_dir,
+                files_extracted: e.files_extracted,
+                files_parsed: 0,
+                records_inserted: 0,
+                issues_found: 0,
+            })
+            .collect();
 
         let tracked_notifications = load_pending_notifications(&self.archive_dir)
             .await?
@@ -256,7 +284,7 @@ impl IngestService {
             dedup.parsed_hashes.insert(current_file_hash.clone());
             dedup
                 .seen_paths
-                .entry(path)
+                .entry(path.clone())
                 .or_default()
                 .insert(current_file_hash);
 
@@ -267,6 +295,15 @@ impl IngestService {
                 summary.records_inserted += records_inserted;
                 summary.issues_found += issues_found;
             }
+
+            if let Some(agg) = arch_agg
+                .iter_mut()
+                .find(|a| path.starts_with(&a.output_dir))
+            {
+                agg.files_parsed += 1;
+                agg.records_inserted += records_inserted;
+                agg.issues_found += issues_found;
+            }
         }
 
         if let Err(error) = self.flush(&cred_rows, &source_file_rows, &source_path_rows).await {
@@ -274,6 +311,19 @@ impl IngestService {
             return Err(error);
         }
         drop(dedup_guard);
+
+        for agg in &arch_agg {
+            self.events.emit(AppEvent::archive_done(
+                agg.name.clone(),
+                agg.files_extracted,
+                agg.files_parsed,
+                agg.records_inserted,
+                agg.issues_found,
+            ));
+        }
+        if stats.did_work() {
+            self.events.emit(AppEvent::import(&stats));
+        }
 
         let mut dirs_to_remove = extracted_paths;
         for (notification_path, mut notification, output_dir) in tracked_notifications {
@@ -334,13 +384,31 @@ async fn read_archive_dir(archive_dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(archives)
 }
 
-async fn process_pending_archives(archive_dir: &Path, input_dir: &Path) -> Result<Vec<PathBuf>> {
+struct ExtractedArchive {
+    name: String,
+    output_dir: PathBuf,
+    files_extracted: usize,
+}
+
+fn archive_name_of(path: &Path) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("archive")
+        .to_string()
+}
+
+async fn process_pending_archives(
+    archive_dir: &Path,
+    input_dir: &Path,
+    events: &EventBus,
+) -> Result<Vec<ExtractedArchive>> {
     let mut archives: Vec<PathBuf> = read_archive_dir(archive_dir).await?;
     archives.sort();
 
     let mut extracted = vec![];
 
     for archive_path in archives {
+        let archive_name = archive_name_of(&archive_path);
         let needs_password_path = archive_needs_password_path(&archive_path);
         let pass_path = archive_password_path(&archive_path);
 
@@ -366,6 +434,7 @@ async fn process_pending_archives(archive_dir: &Path, input_dir: &Path) -> Resul
             has_password = password_str.is_some(),
             "extracting archive"
         );
+        events.emit(AppEvent::extracting(archive_name.clone()));
 
         let archive_path_for_task = archive_path.clone();
         let output_root = input_dir.to_path_buf();
@@ -382,6 +451,7 @@ async fn process_pending_archives(archive_dir: &Path, input_dir: &Path) -> Resul
         match extract_result {
             Ok(Ok(stats)) => {
                 fs::remove_file(&archive_path).await?;
+                let _ = fs::remove_file(&pass_path).await;
                 if let Err(e) = remove_needs_password_marker(&archive_path).await {
                     warn!(error = %e, "failed to remove needs-password marker");
                 }
@@ -396,7 +466,11 @@ async fn process_pending_archives(archive_dir: &Path, input_dir: &Path) -> Resul
                         "failed to promote telegram archive notification"
                     );
                 }
-                extracted.push(stats.output_dir.clone());
+                extracted.push(ExtractedArchive {
+                    name: archive_name.clone(),
+                    output_dir: stats.output_dir.clone(),
+                    files_extracted: stats.files_extracted,
+                });
                 info!(
                     archive_path = %archive_path.display(),
                     output_dir = %stats.output_dir.display(),
@@ -410,17 +484,17 @@ async fn process_pending_archives(archive_dir: &Path, input_dir: &Path) -> Resul
                     "archive requires a password; waiting for password file"
                 );
                 if !needs_password_path.exists() {
-                    let original_name = archive_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("archive")
-                        .to_string();
-                    if let Ok(Some(request)) = load_upload_request(&archive_path).await
-                        && let Err(e) =
-                            write_needs_password_marker(&archive_path, &original_name, request).await
+                    let request = load_upload_request(&archive_path)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| ArchiveUploadRequest::local(&archive_name));
+                    if let Err(e) =
+                        write_needs_password_marker(&archive_path, &archive_name, request).await
                     {
                         warn!(error = %e, "failed to write needs-password marker");
                     }
+                    events.emit(AppEvent::needs_password(archive_name.clone()));
                 }
             }
             Ok(Err(error)) => {
@@ -434,24 +508,24 @@ async fn process_pending_archives(archive_dir: &Path, input_dir: &Path) -> Resul
                     if let Err(e) = fs::remove_file(&pass_path).await {
                         warn!(error = %e, pass_path = %pass_path.display(), "failed to remove rejected password file");
                     }
-                    if let Ok(Some(request)) = load_upload_request(&archive_path).await {
-                        let original_name = archive_path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("archive")
-                            .to_string();
-                        if let Err(e) =
-                            write_needs_password_marker(&archive_path, &original_name, request).await
-                        {
-                            warn!(error = %e, "failed to refresh needs-password marker");
-                        }
+                    let request = load_upload_request(&archive_path)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| ArchiveUploadRequest::local(&archive_name));
+                    if let Err(e) =
+                        write_needs_password_marker(&archive_path, &archive_name, request).await
+                    {
+                        warn!(error = %e, "failed to refresh needs-password marker");
                     }
+                    events.emit(AppEvent::needs_password(archive_name.clone()));
                 } else {
                     warn!(
                         error = %error,
                         archive_path = %archive_path.display(),
                         "archive extraction failed; will retry later"
                     );
+                    events.emit(AppEvent::failed(archive_name.clone(), error.to_string()));
                 }
             }
             Err(error) => {
@@ -460,6 +534,7 @@ async fn process_pending_archives(archive_dir: &Path, input_dir: &Path) -> Resul
                     archive_path = %archive_path.display(),
                     "archive extraction task panicked; will retry later"
                 );
+                events.emit(AppEvent::failed(archive_name.clone(), error.to_string()));
             }
         }
     }

@@ -1,8 +1,26 @@
-FROM rust:1-bookworm AS builder
+# syntax=docker/dockerfile:1
 
+FROM rust:1-bookworm AS chef
+RUN cargo install cargo-chef --locked
 WORKDIR /app
+
+FROM chef AS planner
 COPY . .
-RUN cargo build --release -p logzz -p downloader
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --release -p logzz -p downloader \
+    && mkdir -p /out \
+    && cp target/release/logzz target/release/downloader /out/
 
 FROM debian:bookworm-slim
 
@@ -21,8 +39,8 @@ RUN sed -i 's/^Components: main$/Components: main non-free non-free-firmware/' \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/logzz /usr/local/bin/logzz
-COPY --from=builder /app/target/release/downloader /usr/local/bin/downloader
+COPY --from=builder /out/logzz /usr/local/bin/logzz
+COPY --from=builder /out/downloader /usr/local/bin/downloader
 COPY migrations /app/migrations
 COPY docker /app/docker
 

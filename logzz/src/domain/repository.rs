@@ -39,6 +39,8 @@ pub struct SearchQuery {
     pub term: String,
     pub search_type: SearchType,
     pub tags: Vec<String>,
+    pub exclude_tags: Vec<String>,
+    pub require_complete: bool,
     pub limit: usize,
     pub offset: usize,
 }

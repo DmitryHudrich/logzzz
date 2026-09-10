@@ -236,7 +236,7 @@ async fn deliver_page(
 ) -> ResponseResult<()> {
     let result = state
         .search
-        .search(query, SearchType::from_str_lossy(search_type), tags, page)
+        .search(query, SearchType::from_str_lossy(search_type), tags, &[], false, page)
         .await;
 
     let result = match result {

@@ -26,3 +26,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 serde_yaml = "0.9"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["multipart"] }
+tokio-stream = { version = "0.1", features = ["sync"] }

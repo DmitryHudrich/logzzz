@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use logzz::application::events::EventBus;
 use logzz::application::ingest::{IngestService, ImportStatus};
 use logzz::application::search::SearchService;
 use logzz::application::sources::SourceScheduler;
@@ -123,11 +124,13 @@ async fn main() -> Result<()> {
     }
 
     let status = Arc::new(Mutex::new(ImportStatus::default()));
+    let events = EventBus::default();
     let ingest = IngestService::new(
         repo.clone(),
         input_dir.clone(),
         archive_dir.clone(),
         status.clone(),
+        events.clone(),
     );
 
     if let Some(listen_addr) = cfg.rest.listen_addr.clone() {
@@ -145,6 +148,8 @@ async fn main() -> Result<()> {
             status: status.clone(),
             api_token: cfg.rest.api_token.clone(),
             source_names: scheduler.source_names(),
+            events: events.clone(),
+            archive_dir: std::path::PathBuf::from(&archive_dir),
         };
         tokio::spawn(run_rest_api(listen_addr, rest_state));
     } else {

@@ -40,21 +40,18 @@ impl SearchService {
         term: &str,
         search_type: SearchType,
         tags: &[String],
+        exclude_tags: &[String],
+        require_complete: bool,
         page: usize,
     ) -> Result<SearchPage> {
         let offset = page * self.page_size;
-        let mut dedup_tags: Vec<String> = tags
-            .iter()
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect();
-        dedup_tags.sort();
-        dedup_tags.dedup();
 
         let query = SearchQuery {
             term: term.to_string(),
             search_type,
-            tags: dedup_tags,
+            tags: normalize_tags(tags),
+            exclude_tags: normalize_tags(exclude_tags),
+            require_complete,
             limit: self.page_size + 1,
             offset,
         };
@@ -100,6 +97,17 @@ impl SearchService {
             total_unique,
         })
     }
+}
+
+fn normalize_tags(tags: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = tags
+        .iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn build_match(

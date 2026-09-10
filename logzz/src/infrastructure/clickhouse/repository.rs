@@ -167,6 +167,14 @@ fn where_clause_for(search_type: SearchType) -> &'static str {
 const CRED_KEY_EXPR: &str =
     "lowerUTF8(hex(SHA256(concat(url_raw, '\n', username_raw, '\n', password_raw))))";
 
+fn complete_clause(require_complete: bool) -> &'static str {
+    if require_complete {
+        " AND url_raw != '' AND username_raw != '' AND password_raw != ''"
+    } else {
+        ""
+    }
+}
+
 fn tag_filter_clause(tags: &[String]) -> String {
     if tags.is_empty() {
         String::new()
@@ -177,6 +185,19 @@ fn tag_filter_clause(tags: &[String]) -> String {
                  WHERE tag IN ? AND deleted = 0
                  GROUP BY cred_key
                  HAVING uniqExact(tag) = ?
+             )"
+        )
+    }
+}
+
+fn exclude_tag_clause(exclude_tags: &[String]) -> String {
+    if exclude_tags.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " AND {CRED_KEY_EXPR} NOT IN (
+                 SELECT cred_key FROM cred_tags FINAL
+                 WHERE tag IN ? AND deleted = 0
              )"
         )
     }
@@ -280,17 +301,22 @@ impl CredentialRepository for ClickhouseCredentialRepository {
                  groupUniqArray(source_file) AS source_files,
                  groupUniqArray(file_hash)   AS file_hashes
              FROM creds
-             WHERE {where_clause}{tag_clause}
+             WHERE {where_clause}{complete}{tag_clause}{exclude_clause}
              GROUP BY url_raw, username_raw, password_raw
              ORDER BY url_raw, username_raw
              LIMIT ? OFFSET ?",
             where_clause = where_clause_for(query.search_type),
+            complete = complete_clause(query.require_complete),
             tag_clause = tag_filter_clause(&query.tags),
+            exclude_clause = exclude_tag_clause(&query.exclude_tags),
         );
 
         let mut request = self.client.query(&sql).bind(&pattern);
         if !query.tags.is_empty() {
             request = request.bind(&query.tags).bind(query.tags.len() as u64);
+        }
+        if !query.exclude_tags.is_empty() {
+            request = request.bind(&query.exclude_tags);
         }
         let rows = request
             .bind(query.limit as u64)
@@ -315,16 +341,21 @@ impl CredentialRepository for ClickhouseCredentialRepository {
         let pattern = format!("%{}%", query.term.to_lowercase());
         let sql = format!(
             "SELECT count() FROM (
-                 SELECT 1 FROM creds WHERE {where_clause}{tag_clause}
+                 SELECT 1 FROM creds WHERE {where_clause}{complete}{tag_clause}{exclude_clause}
                  GROUP BY url_raw, username_raw, password_raw
              )",
             where_clause = where_clause_for(query.search_type),
+            complete = complete_clause(query.require_complete),
             tag_clause = tag_filter_clause(&query.tags),
+            exclude_clause = exclude_tag_clause(&query.exclude_tags),
         );
 
         let mut request = self.client.query(&sql).bind(&pattern);
         if !query.tags.is_empty() {
             request = request.bind(&query.tags).bind(query.tags.len() as u64);
+        }
+        if !query.exclude_tags.is_empty() {
+            request = request.bind(&query.exclude_tags);
         }
         let rows = request.fetch_all::<CountRow>().await?;
 
