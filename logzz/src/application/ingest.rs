@@ -518,6 +518,7 @@ async fn process_pending_archives(
                     {
                         warn!(error = %e, "failed to refresh needs-password marker");
                     }
+                    events.emit(AppEvent::failed(archive_name.clone(), error.to_string()));
                     events.emit(AppEvent::needs_password(archive_name.clone()));
                 } else {
                     warn!(

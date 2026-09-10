@@ -90,9 +90,11 @@
   .bar>i.warn{background:var(--warn)}
   .bar>i.err{background:var(--danger)}
   @keyframes slide{0%{margin-left:-40%}100%{margin-left:100%}}
-  .pwform{display:flex;gap:8px;margin-top:2px}
-  .pwform input{flex:1;background:var(--surface2);border:1px solid var(--warn);border-radius:8px;color:var(--text-hi);
+  .pwform{display:flex;flex-direction:column;gap:6px;margin-top:4px;width:100%}
+  .pwrow{display:flex;gap:8px}
+  .pwrow input{flex:1;background:var(--surface2);border:1px solid var(--warn);border-radius:8px;color:var(--text-hi);
     font-family:var(--mono);font-size:12px;padding:7px 10px;outline:none}
+  .pwerr{color:var(--danger);font-size:11px;word-break:break-all}
 
   .meta{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:20px 2px 12px;flex-wrap:wrap}
   .meta .res{color:var(--text-dim);font-size:12px}
@@ -387,7 +389,7 @@ $("#q").addEventListener("keydown",e=>{if(e.key==="Enter")search(0);});
 $("#prev").onclick=()=>{if(S.page>0)search(S.page-1);};
 $("#next").onclick=()=>{if(S.hasNext)search(S.page+1);};
 
-const prows=new Map();let uid=0;
+const prows=new Map();let uid=0;const pwState=new Map();
 function ensureRow(key){
   let r=prows.get(key);
   if(!r){
@@ -416,21 +418,25 @@ function askPassword(archive){
   let r=findByArchive(archive);
   if(r&&r.pw)return;
   if(!r){r=ensureRow("a:"+archive);r.archive=archive;}
-  paint(r,r.name||archive,"нужен пароль","warn",100);
-  if(!r.pw){
-    const f=el("div","pwform");
-    const inp=el("input");inp.type="password";inp.placeholder="пароль архива";
-    const b=el("button","btn sm","OK");
-    const send=()=>{
-      const v=inp.value;if(!v)return;
-      b.disabled=true;
-      api("/api/archives/password",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({archive:archive,password:v})})
-        .then(()=>{toast("Пароль отправлен");paint(r,r.name||archive,"проверка пароля…","busy",0);loadQueue();})
-        .catch(e=>{b.disabled=false;toast("Ошибка: "+e.message,true);});
-    };
-    b.onclick=send;inp.onkeydown=e=>{if(e.key==="Enter")send();};
-    f.appendChild(inp);f.appendChild(b);r.el.appendChild(f);r.pw=f;inp.focus();
-  }
+  const st=pwState.get(archive)||{};
+  paint(r,r.name||archive,st.error?"пароль не подошёл":"нужен пароль","warn",100);
+  const f=el("div","pwform");
+  if(st.error)f.appendChild(el("div","pwerr","✗ "+st.error));
+  const line=el("div","pwrow");
+  const inp=el("input");inp.type="text";inp.placeholder="пароль архива";inp.autocomplete="off";inp.spellcheck=false;
+  if(st.value)inp.value=st.value;
+  const b=el("button","btn sm","OK");
+  const send=()=>{
+    const v=inp.value;if(!v)return;
+    pwState.set(archive,{value:v});
+    b.disabled=true;
+    api("/api/archives/password",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({archive:archive,password:v})})
+      .then(()=>{toast("Пароль отправлен, проверяю…");paint(r,r.name||archive,"проверка пароля…","busy",0);loadQueue();})
+      .catch(e=>{b.disabled=false;toast("Ошибка: "+e.message,true);});
+  };
+  b.onclick=send;inp.onkeydown=e=>{if(e.key==="Enter")send();};
+  line.appendChild(inp);line.appendChild(b);f.appendChild(line);
+  r.el.appendChild(f);r.pw=f;inp.focus();
 }
 function findByArchive(a){for(const r of prows.values())if(r.archive===a)return r;return null;}
 function upsertArchive(a,label,state,pct){
@@ -463,9 +469,22 @@ function handleEvent(ev){
     case"import":{const m=`Импортировано: +${ev.records_inserted} учёток, +${ev.files_parsed} файлов`;toast(m);osNotify("Logzz — новый импорт",m);loadStats();loadTags();break;}
     case"archive_queued":upsertArchive(ev.archive,"в очереди","busy",0);break;
     case"archive_extracting":upsertArchive(ev.archive,"распаковка","busy",0);break;
-    case"archive_done":{upsertArchive(ev.archive,`готово · ${ev.records_inserted} записей`,"ok",100);osNotify("Архив обработан",`${ev.archive}: ${ev.records_inserted} записей`);loadStats();break;}
-    case"archive_needs_password":{askPassword(ev.archive);toast("Нужен пароль: "+ev.archive,true);osNotify("Нужен пароль",ev.archive);break;}
-    case"archive_failed":{upsertArchive(ev.archive,"ошибка","err",100);toast("Ошибка архива: "+ev.archive,true);osNotify("Ошибка архива",ev.archive+": "+(ev.error||""));break;}
+    case"archive_done":{pwState.delete(ev.archive);upsertArchive(ev.archive,`готово · ${ev.records_inserted} записей`,"ok",100);osNotify("Архив обработан",`${ev.archive}: ${ev.records_inserted} записей`);loadStats();break;}
+    case"archive_needs_password":{askPassword(ev.archive);break;}
+    case"archive_failed":{
+      const em=ev.error?(": "+ev.error):"";
+      if(pwState.has(ev.archive)){
+        const cur=pwState.get(ev.archive)||{};
+        pwState.set(ev.archive,{value:cur.value,error:ev.error||"не удалось распаковать (проверь пароль)"});
+        if(findByArchive(ev.archive)){const rr=findByArchive(ev.archive);if(rr.pw){rr.pw.remove();rr.pw=null;}}
+        askPassword(ev.archive);
+        toast("Пароль не подошёл"+em,true);osNotify("Пароль не подошёл",ev.archive+em);
+      }else{
+        upsertArchive(ev.archive,"ошибка"+em,"err",100);
+        toast("Ошибка распаковки "+ev.archive+em,true);osNotify("Ошибка распаковки",ev.archive+em);
+      }
+      break;
+    }
     case"problem":{toast("Проблема импорта: "+ev.message,true);osNotify("Проблема импорта",ev.message);break;}
   }
 }

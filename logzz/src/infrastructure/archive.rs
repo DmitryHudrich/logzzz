@@ -345,6 +345,14 @@ fn extract_rar(
             ExtractorRun::Extracted => return finalize_rar_extraction(output_dir),
             ExtractorRun::PasswordRequired => return Err(ExtractError::PasswordRequired),
             ExtractorRun::Failed(message) => {
+                if looks_like_create_conflict(&message) && dir_contains_files(output_dir) {
+                    tracing::warn!(
+                        tool,
+                        error = %message,
+                        "rar extraction hit a path conflict but files were extracted; salvaging them"
+                    );
+                    return finalize_rar_extraction(output_dir);
+                }
                 ran_any = true;
                 last_failure = Some(message);
                 // Wipe any partial output before the next extractor retries into the same dir.
@@ -366,6 +374,28 @@ fn extract_rar(
     Err(ExtractError::Failed(
         last_failure.unwrap_or_else(|| "RAR extraction failed".to_string()),
     ))
+}
+
+fn looks_like_create_conflict(message: &str) -> bool {
+    let m = message.to_lowercase();
+    let create_like = m.contains("file exists")
+        || m.contains("cannot create")
+        || m.contains("code 9");
+    let data_or_auth = m.contains("password")
+        || m.contains("crc")
+        || m.contains("checksum")
+        || m.contains("corrupt")
+        || m.contains("damaged")
+        || m.contains("code 3")
+        || m.contains("code 11");
+    create_like && !data_or_auth
+}
+
+fn dir_contains_files(dir: &Path) -> bool {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .any(|entry| entry.path().is_file())
 }
 
 /// Runs a single external RAR extractor and classifies the result.
@@ -403,7 +433,11 @@ fn run_rar_extractor(
                     cmd.arg("-p-");
                 }
             }
-            cmd.arg("-inul").arg(archive_path).arg(output_dir);
+            let mut dest = output_dir.display().to_string();
+            if !dest.ends_with('/') {
+                dest.push('/');
+            }
+            cmd.arg(archive_path).arg(dest);
         }
         other => return ExtractorRun::Failed(format!("unknown RAR extractor: {other}")),
     }
@@ -440,7 +474,17 @@ fn run_rar_extractor(
     }
 
     let code = output.status.code().unwrap_or(-1);
-    ExtractorRun::Failed(format!("`{tool}` exited with code {code}"))
+    let detail = combined
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if detail.is_empty() {
+        ExtractorRun::Failed(format!("`{tool}` exited with code {code}"))
+    } else {
+        ExtractorRun::Failed(format!("`{tool}` exited with code {code}: {detail}"))
+    }
 }
 
 /// Walks the extracted output to count files and enforce the zip/rar-bomb guards.
@@ -532,6 +576,19 @@ mod tests {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id();
         std::env::temp_dir().join(format!("logzz-test-{label}-{pid}-{n}"))
+    }
+
+    #[test]
+    fn create_conflict_is_distinguished_from_password_and_crc_errors() {
+        assert!(looks_like_create_conflict("`unrar` exited with code 9: File exists"));
+        assert!(looks_like_create_conflict("Cannot create data/creds.txt"));
+        assert!(!looks_like_create_conflict(
+            "`unrar` exited with code 11: The password is incorrect"
+        ));
+        assert!(!looks_like_create_conflict(
+            "`unrar` exited with code 3: CRC failed"
+        ));
+        assert!(!looks_like_create_conflict("code 9: file exists but crc failed"));
     }
 
     #[test]
