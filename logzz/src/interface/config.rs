@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::env;
 use std::fs;
 
-use crate::archive::{default_archive_dir, sanitize_filename};
+use crate::infrastructure::archive::{default_archive_dir, sanitize_filename};
 
 const DEFAULT_CONFIG_PATH: &str = "config.yaml";
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 5;
@@ -47,6 +47,12 @@ pub struct Cli {
     pub proxy: Option<String>,
     #[arg(long, value_delimiter = ',')]
     pub allowed_user_ids: Option<Vec<i64>>,
+    #[arg(long)]
+    pub rest_listen_addr: Option<String>,
+    #[arg(long)]
+    pub rest_api_token: Option<String>,
+    #[arg(long, value_delimiter = ',')]
+    pub local_source_dir: Option<Vec<String>>,
 }
 
 #[derive(Debug, Parser)]
@@ -85,6 +91,8 @@ pub struct AppConfig {
     pub poll_interval_secs: u64,
     pub telegram: TelegramConfig,
     pub socks_proxy: Option<String>,
+    pub rest: RestConfig,
+    pub local_source_dirs: Vec<String>,
 }
 
 impl std::fmt::Debug for AppConfig {
@@ -97,6 +105,29 @@ impl std::fmt::Debug for AppConfig {
             .field("poll_interval_secs", &self.poll_interval_secs)
             .field("telegram", &self.telegram)
             .field("socks_proxy", &redact_opt(&self.socks_proxy))
+            .field("rest", &self.rest)
+            .field("local_source_dirs", &self.local_source_dirs)
+            .finish()
+    }
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct RestConfig {
+    pub listen_addr: Option<String>,
+    pub api_token: Option<String>,
+}
+
+impl RestConfig {
+    pub fn enabled(&self) -> bool {
+        self.listen_addr.is_some()
+    }
+}
+
+impl std::fmt::Debug for RestConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RestConfig")
+            .field("listen_addr", &self.listen_addr)
+            .field("api_token", &redact_opt(&self.api_token))
             .finish()
     }
 }
@@ -194,6 +225,19 @@ struct FileConfig {
     pub poll_interval_secs: Option<u64>,
     pub telegram: Option<PartialTelegramConfig>,
     pub downloader: Option<PartialDownloaderConfig>,
+    pub rest: Option<PartialRestConfig>,
+    pub sources: Option<PartialSourcesConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialRestConfig {
+    pub listen_addr: Option<String>,
+    pub api_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialSourcesConfig {
+    pub local_dirs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -242,6 +286,9 @@ struct LogzzEnv {
     max_results: Option<usize>,
     socks: Option<String>,
     allowed_user_ids: Option<Vec<i64>>,
+    rest_listen_addr: Option<String>,
+    rest_api_token: Option<String>,
+    local_source_dirs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -283,6 +330,8 @@ fn read_yaml_config(path: &str) -> Result<FileConfig> {
 fn build_app_config(file: FileConfig, cli: &Cli, env: LogzzEnv) -> Result<AppConfig> {
     let file_clickhouse = file.clickhouse.unwrap_or_default();
     let file_telegram = file.telegram.unwrap_or_default();
+    let file_rest = file.rest.unwrap_or_default();
+    let file_sources = file.sources.unwrap_or_default();
 
     let clickhouse = ClickhouseConfig {
         url: pick_required(
@@ -384,6 +433,24 @@ fn build_app_config(file: FileConfig, cli: &Cli, env: LogzzEnv) -> Result<AppCon
                 Vec::new,
             ),
         },
+        rest: RestConfig {
+            listen_addr: env
+                .rest_listen_addr
+                .or(cli.rest_listen_addr.clone())
+                .or(file_rest.listen_addr),
+            api_token: env
+                .rest_api_token
+                .or(cli.rest_api_token.clone())
+                .or(file_rest.api_token),
+        },
+        local_source_dirs: pick_first(
+            [
+                env.local_source_dirs,
+                cli.local_source_dir.clone(),
+                file_sources.local_dirs,
+            ],
+            Vec::new,
+        ),
     })
 }
 
@@ -481,6 +548,10 @@ impl LogzzEnv {
             socks: get_env_string("LOGZZ_TELEGRAM__SOCKS"),
             allowed_user_ids: get_env_string("LOGZZ_TELEGRAM__ALLOWED_USER_IDS")
                 .map(|raw| parse_id_list(&raw)),
+            rest_listen_addr: get_env_string("LOGZZ_REST__LISTEN_ADDR"),
+            rest_api_token: get_env_string("LOGZZ_REST__API_TOKEN"),
+            local_source_dirs: get_env_string("LOGZZ_SOURCES__LOCAL_DIRS")
+                .map(|raw| parse_path_list(&raw)),
         }
     }
 }
@@ -510,6 +581,14 @@ fn parse_id_list(raw: &str) -> Vec<i64> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .filter_map(|s| s.parse().ok())
+        .collect()
+}
+
+fn parse_path_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
         .collect()
 }
 
@@ -600,6 +679,8 @@ mod tests {
                 api_hash: Some("yaml-hash".to_string()),
                 rest_api_token: None,
             }),
+            rest: None,
+            sources: None,
         }
     }
 
@@ -621,6 +702,9 @@ mod tests {
             max_results: Some(23),
             proxy: None,
             allowed_user_ids: None,
+            rest_listen_addr: None,
+            rest_api_token: None,
+            local_source_dir: None,
         };
         let env = LogzzEnv {
             clickhouse_url: Some("http://env:8123".to_string()),
@@ -732,6 +816,9 @@ mod tests {
                 results_dir: None,
                 max_results: None,
                 allowed_user_ids: None,
+                rest_listen_addr: None,
+                rest_api_token: None,
+                local_source_dir: None,
             },
             LogzzEnv::default(),
         )
@@ -800,6 +887,9 @@ mod tests {
                 max_results: None,
                 proxy: None,
                 allowed_user_ids: None,
+                rest_listen_addr: None,
+                rest_api_token: None,
+                local_source_dir: None,
             },
             LogzzEnv::default(),
         )

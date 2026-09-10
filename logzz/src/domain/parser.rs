@@ -4,13 +4,16 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use crate::records::{AccountRecord, ParseIssue, ParseReport, RawRecord};
+use crate::domain::record::{AccountRecord, ParseIssue, ParseReport, RawRecord};
 
 pub fn parse_file(path: &Path) -> ParseReport {
     let parser = Parser::new();
 
-    match fs::read_to_string(path) {
-        Ok(content) => parser.parse_text(&content, &path.display().to_string()),
+    match fs::read(path) {
+        Ok(bytes) => {
+            let content = String::from_utf8_lossy(&bytes);
+            parser.parse_text(&content, &path.display().to_string())
+        }
         Err(err) => ParseReport {
             records: vec![],
             issues: vec![ParseIssue {

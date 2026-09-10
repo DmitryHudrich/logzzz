@@ -8,11 +8,13 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::{error, info, warn};
 
-use crate::archive::{
+use crate::infrastructure::archive::{
     archive_password_path, build_archive_filename, detect_archive_kind, find_archive_by_message_id,
     partial_archive_path,
 };
-use crate::telegram::{ArchiveUploadRequest, remove_upload_request, write_upload_request};
+use crate::infrastructure::telegram_ipc::{
+    ArchiveUploadRequest, remove_upload_request, write_upload_request,
+};
 
 use super::state::BotState;
 

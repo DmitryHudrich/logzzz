@@ -1,8 +1,9 @@
-pub mod archive;
-pub mod bot;
-pub mod config;
-pub mod importer;
-pub mod migrate;
-pub mod parser;
-pub mod records;
-pub mod telegram;
+pub mod application;
+pub mod domain;
+pub mod infrastructure;
+pub mod interface;
+
+pub use infrastructure::archive;
+pub use infrastructure::telegram_ipc as telegram;
+pub use interface::config;
+pub use interface::{bot, rest};

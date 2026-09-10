@@ -1,5 +1,5 @@
 use super::state::PAGE_SIZE;
-use super::types::CredRecord;
+use crate::domain::CredentialMatch;
 
 pub fn sanitize_filename(query: &str, search_type: &str, page: usize) -> String {
     let safe: String = query
@@ -30,7 +30,7 @@ fn safe_name_for_links(query: &str) -> String {
 }
 
 pub fn render_html_report(
-    records: &[CredRecord],
+    records: &[CredentialMatch],
     query: &str,
     search_type: &str,
     page: usize,
@@ -142,6 +142,8 @@ pub fn render_html_report(
   .pass-val {{ color:var(--danger); font-weight:500; }}
   .src-val  {{ color:var(--text-dim); font-size:11.5px; }}
   .extra-tag {{ font-size:9px; font-weight:700; letter-spacing:.5px; text-transform:uppercase; padding:1px 7px; border:1px solid var(--border-hi); border-radius:99px; color:var(--text-dim); }}
+  .tags-val {{ display:inline-flex; flex-wrap:wrap; gap:6px; }}
+  .tag-chip {{ font-size:10px; font-weight:700; letter-spacing:.4px; padding:2px 9px; border:1px solid var(--accent2); border-radius:99px; color:var(--accent2); background:rgba(0,229,176,.08); }}
   .src-field {{ padding-top:8px; border-top:1px solid var(--border); margin-top:2px; }}
   .drawer {{ border-top:1px solid var(--border); background:var(--surface2); }}
   .drawer-toggle {{ width:100%; display:flex; align-items:center; gap:10px; padding:9px 18px; background:none; border:none; cursor:pointer; color:var(--text-dim); font-family:var(--mono); font-size:11px; text-align:left; transition:color .15s,background .15s; }}
@@ -209,7 +211,7 @@ pub fn render_html_report(
     )
 }
 
-fn render_record(idx: usize, r: &CredRecord) -> String {
+fn render_record(idx: usize, r: &CredentialMatch) -> String {
     let extra_tag = if r.extra_json.len() > 2 {
         r#" <span class="extra-tag">+extra</span>"#
     } else {
@@ -243,6 +245,21 @@ fn render_record(idx: usize, r: &CredRecord) -> String {
         format!("{} — expand to see source path", pill)
     };
 
+    let tags_html = if r.tags.is_empty() {
+        String::new()
+    } else {
+        let chips: String = r
+            .tags
+            .iter()
+            .map(|t| format!(r#"<span class="tag-chip">{}</span>"#, html_escape(t)))
+            .collect();
+        format!(
+            r#"
+      <div class="field"><span class="label">TAGS</span><span class="value tags-val">{chips}</span></div>"#,
+            chips = chips,
+        )
+    };
+
     format!(
         r#"<div class="record" style="animation-delay:{delay}ms">
   <div class="record-top">
@@ -254,7 +271,7 @@ fn render_record(idx: usize, r: &CredRecord) -> String {
       <div class="field src-field">
         <span class="label">SOURCE</span>
         <span class="value src-val">{primary}</span>{extra}
-      </div>
+      </div>{tags_html}
     </div>
   </div>
   <div class="drawer" data-open="false">
@@ -271,6 +288,7 @@ fn render_record(idx: usize, r: &CredRecord) -> String {
         password = html_escape(&r.password),
         primary = html_escape(&r.primary_path),
         extra = extra_tag,
+        tags_html = tags_html,
         drawer_label = drawer_label,
         paths_html = paths_html,
     )
