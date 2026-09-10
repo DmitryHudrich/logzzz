@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
-use crate::archive::{ARCHIVE_NEEDS_PASSWORD_SUFFIX, archive_needs_password_path, sanitize_filename};
+use crate::infrastructure::archive::{
+    ARCHIVE_NEEDS_PASSWORD_SUFFIX, archive_needs_password_path, sanitize_filename,
+};
 
 pub const ARCHIVE_UPLOAD_REQUEST_SUFFIX: &str = ".logzz-upload.json";
 const PENDING_NOTIFICATION_DIR: &str = ".logzz-telegram";

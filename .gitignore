@@ -14,6 +14,9 @@
 *.needs-password
 *.logzz-upload.json
 
+# Claude Code local session/memory data.
+/.claude/
+
 # Secrets and machine-local config.
 .env
 .env.*

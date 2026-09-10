@@ -1,10 +1,10 @@
 mod archive;
 mod handlers;
 mod html;
-mod query;
+mod notifications;
 mod state;
-mod types;
 
+pub use notifications::{flush_password_request_notifications, flush_ready_notifications};
 pub use state::BotState;
 
 use eyre::Result;

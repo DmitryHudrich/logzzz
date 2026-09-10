@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use crate::records::{AccountRecord, ParseIssue, ParseReport, RawRecord};
+use crate::domain::record::{AccountRecord, ParseIssue, ParseReport, RawRecord};
 
 pub fn parse_file(path: &Path) -> ParseReport {
     let parser = Parser::new();

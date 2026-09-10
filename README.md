@@ -110,6 +110,110 @@ docker compose up --build
 предупреждение в лог. Держи `DOWNLOADER_REST_API_TOKEN` заданным всегда, когда порт
 доступен за пределами localhost.
 
+## REST API logzz
+
+Помимо Telegram-бота, `logzz` поднимает собственный HTTP API для поиска, загрузки
+архивов и мониторинга импорта. API включается, только если задан
+`LOGZZ_REST__LISTEN_ADDR`.
+
+По умолчанию в compose:
+
+- внутри контейнера: `0.0.0.0:8091`
+- с хоста: `http://127.0.0.1:8091` (порт публикуется только на loopback, см.
+  `LOGZZ_REST_BIND_ADDR` / `LOGZZ_REST_PORT` в `.env.example`)
+
+Все эндпоинты, кроме `/health`, требуют заголовок
+`Authorization: Bearer $LOGZZ_REST_API_TOKEN`, если токен задан. Если
+`LOGZZ_REST__API_TOKEN` пуст — API открыт для всех, кто дотянется до порта (при старте
+пишется предупреждение в лог). Держи токен заданным всегда, когда порт доступен за
+пределами localhost.
+
+Эндпоинты:
+
+- `GET /health` — проверка живости (без авторизации).
+- `GET /metrics` — счётчики: всего учёток, всего исходных файлов, статистика последнего
+  цикла импорта, список подключённых источников.
+- `GET /api/search?type=url|login&q=<запрос>&tags=<t1,t2>&page=<n>` — поиск с
+  пагинацией, JSON. Можно фильтровать по тегам: `tags=vip,checked` вернёт только записи,
+  у которых есть **все** перечисленные теги. Достаточно указать хотя бы один из `q`/`tags`.
+- `GET /api/import/status` — статус фонового импортёра (последний цикл, суммарные
+  счётчики, очередь необработанных архивов).
+- `POST /api/archives` — загрузка архива (`multipart/form-data`, поле `file`); файл
+  кладётся в inbox и импортируется в фоне.
+- `GET /api/tags` — список всех используемых тегов.
+- `POST /api/tags` — добавить теги записи. Тело:
+  `{"url":"...","username":"...","password":"...","tags":["vip"]}`.
+- `DELETE /api/tags` — снять теги (тело такое же, как у `POST`).
+
+Примеры:
+
+```bash
+curl http://127.0.0.1:8091/health
+
+curl -H "Authorization: Bearer $LOGZZ_REST_API_TOKEN" \
+  "http://127.0.0.1:8091/api/search?type=url&q=example.com&page=0"
+
+curl -H "Authorization: Bearer $LOGZZ_REST_API_TOKEN" \
+  -F "file=@dump.zip" \
+  http://127.0.0.1:8091/api/archives
+
+curl -H "Authorization: Bearer $LOGZZ_REST_API_TOKEN" \
+  http://127.0.0.1:8091/metrics
+
+# добавить теги к найденной записи
+curl -X POST http://127.0.0.1:8091/api/tags \
+  -H "Authorization: Bearer $LOGZZ_REST_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com","username":"alice","password":"hunter2","tags":["vip","checked"]}'
+
+# поиск только по тегам
+curl -H "Authorization: Bearer $LOGZZ_REST_API_TOKEN" \
+  "http://127.0.0.1:8091/api/search?q=example.com&tags=vip,checked"
+```
+
+## Теги
+
+К каждой найденной записи (уникальная тройка `url` + `username` + `password`) можно
+привязать произвольные теги и потом фильтровать по ним при поиске.
+
+- Теги хранятся в ClickHouse (`cred_tags`), привязка — по хэшу тройки.
+- Управление — через REST (`/api/tags`, см. выше). Теги видны в ответах `/api/search` и
+  в HTML-отчётах бота.
+- В Telegram-боте можно фильтровать прямо в запросе через `#тег`:
+  `/url example.com #vip #checked` — вернёт записи по `example.com` со всеми
+  указанными тегами. Можно искать только по тегам: `/url #vip`.
+- При нескольких тегах действует логика AND (запись должна иметь все указанные теги).
+
+## Источники логов
+
+Источник логов — это всё, что находит и передаёт архивы в пайплайн импорта. Источники
+реализуют трейт `LogSource` (`logzz::domain::source`) и складывают архивы в общий inbox
+(`ArchiveInbox`), откуда их забирает импортёр. Добавить новый источник = реализовать
+трейт в слое `infrastructure` и зарегистрировать его при старте в `main.rs`.
+
+Доступны:
+
+- **Telegram downloader** (`downloader`) — отдельный бинарник, качает архивы из peer.
+- **Локальная директория** — `logzz` следит за указанными папками и импортирует
+  положенные туда `.zip`/`.rar`. Настраивается через `LOGZZ_SOURCES__LOCAL_DIRS`
+  (список путей через запятую) или флаг `--local-source-dir`.
+- **Загрузка по REST** — `POST /api/archives` (см. выше).
+
+## Архитектура
+
+Код `logzz` разделён по слоям clean architecture:
+
+- `domain/` — сущности (`AccountRecord`, `FileHash`) и порты-трейты (`LogSource`,
+  `ArchiveInbox`, `CredentialRepository`) + парсер. Ни от чего внешнего не зависит.
+- `application/` — сценарии: `IngestService` (цикл импорта), `SearchService` (поиск),
+  `SourceScheduler` (опрос источников). Зависит только от портов домена.
+- `infrastructure/` — реализации портов: ClickHouse-репозиторий, извлечение архивов,
+  файловый inbox, локальный источник, Telegram-IPC.
+- `interface/` — точки входа: REST API, Telegram-бот, конфиг/CLI.
+
+`main.rs` связывает слои: собирает реализации инфраструктуры и передаёт их сценариям
+через трейты.
+
 ## Access control
 
 Два места, которые по умолчанию **открыты для всех**, если явно не ограничить:
@@ -122,7 +226,10 @@ docker compose up --build
   `LOGZZ_TELEGRAM_ALLOWED_USER_IDS=123456789,987654321`. При пустом значении `logzz`
   запускается (для обратной совместимости), но пишет громкое предупреждение в лог.
 - **downloader REST API** (`/auth/*`): см. раздел выше про `DOWNLOADER_REST_API_TOKEN`.
+- **logzz REST API** (`/api/*`, `/metrics`): без `LOGZZ_REST__API_TOKEN` любой, кто
+  дотянется до порта, может искать по базе учёток и загружать архивы. См. раздел
+  [REST API logzz](#rest-api-logzz).
 
-Оба варианта проверены тестами в `logzz/src/config.rs`, но применяются только если
-переменные окружения действительно заданы — пустая конфигурация не ломает существующие
-локальные деплойменты, а лишь предупреждает о риске.
+Все варианты применяются только если соответствующие переменные окружения действительно
+заданы — пустая конфигурация не ломает существующие локальные деплойменты, а лишь
+предупреждает о риске.

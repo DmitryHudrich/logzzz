@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use tokio::io::AsyncReadExt;
 use walkdir::WalkDir;
 
-use crate::archive::{is_archive_file, is_partial_file};
-use crate::importer::FileHash;
+use crate::domain::record::FileHash;
+use crate::infrastructure::archive::{is_archive_file, is_partial_file};
 
 pub fn iter_files(input_dir: &Path) -> impl Iterator<Item = PathBuf> + '_ {
     WalkDir::new(input_dir)

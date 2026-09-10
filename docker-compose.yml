@@ -50,6 +50,20 @@ services:
       # imported credential database. See README "Access control".
       LOGZZ_TELEGRAM__ALLOWED_USER_IDS: ${LOGZZ_TELEGRAM_ALLOWED_USER_IDS:-}
       # LOGZZ_TELEGRAM__SOCKS: "socks5://127.0.0.1:1234"
+      # Always bind 0.0.0.0 inside the container so the host port mapping below can reach
+      # it; the host-side publish is what's restricted to loopback by default.
+      LOGZZ_REST__LISTEN_ADDR: 0.0.0.0:8091
+      # Bearer token required on every REST endpoint except /health. Strongly recommended:
+      # without it, anyone who can reach this port can read the full credential database.
+      LOGZZ_REST__API_TOKEN: ${LOGZZ_REST_API_TOKEN:-}
+      # Comma-separated directories to watch for archives to ingest, in addition to the
+      # telegram downloader. Drop .zip/.rar files in a mounted dir and set it here.
+      LOGZZ_SOURCES__LOCAL_DIRS: ${LOGZZ_LOCAL_SOURCE_DIRS:-}
+    ports:
+      # Bound to loopback by default; every endpoint except /health exposes credential
+      # data. Use an SSH tunnel for remote access, or set LOGZZ_REST_BIND_ADDR plus
+      # LOGZZ_REST_API_TOKEN to expose it safely.
+      - "${LOGZZ_REST_BIND_ADDR:-127.0.0.1}:${LOGZZ_REST_PORT:-8091}:8091"
     volumes:
       - ./.local:/app/.local
       - ./migrations:/app/migrations:ro
