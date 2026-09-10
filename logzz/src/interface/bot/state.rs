@@ -1,9 +1,13 @@
 use dashmap::DashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub use crate::application::search::PAGE_SIZE;
 use crate::application::search::SearchService;
+
+const SESSION_TTL: Duration = Duration::from_secs(60 * 60);
+const MAX_SESSIONS: usize = 10_000;
 
 #[derive(Clone)]
 pub struct Session {
@@ -12,6 +16,7 @@ pub struct Session {
     pub tags: Vec<String>,
     pub page: usize,
     pub has_next: bool,
+    pub updated: Instant,
 }
 
 pub type SessionStore = Arc<DashMap<(i64, u32), Session>>;
@@ -46,5 +51,23 @@ impl BotState {
 
     pub fn is_user_allowed(&self, user_id: i64) -> bool {
         self.allowed_user_ids.is_empty() || self.allowed_user_ids.contains(&user_id)
+    }
+
+    pub fn prune_sessions(&self) {
+        self.sessions
+            .retain(|_, session| session.updated.elapsed() < SESSION_TTL);
+
+        if self.sessions.len() > MAX_SESSIONS {
+            let mut entries: Vec<((i64, u32), Instant)> = self
+                .sessions
+                .iter()
+                .map(|entry| (*entry.key(), entry.value().updated))
+                .collect();
+            entries.sort_by_key(|(_, updated)| *updated);
+            let excess = self.sessions.len() - MAX_SESSIONS;
+            for (key, _) in entries.into_iter().take(excess) {
+                self.sessions.remove(&key);
+            }
+        }
     }
 }

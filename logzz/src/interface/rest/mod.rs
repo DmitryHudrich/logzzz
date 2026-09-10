@@ -9,6 +9,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tracing::{error, info};
 
 use crate::application::ingest::SharedImportStatus;
@@ -231,22 +232,43 @@ async fn upload_archive(State(state): State<RestState>, mut multipart: Multipart
         .map(|s| s.to_string())
         .unwrap_or_else(|| "archive".to_string());
 
-    let bytes = match field.bytes().await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return api_error(StatusCode::BAD_REQUEST, &error.to_string()).into_response();
-        }
-    };
-
     let temp_path = std::env::temp_dir().join(format!(
         "logzz-upload-{}-{}",
         std::process::id(),
         rand::random::<u64>()
     ));
 
-    if let Err(error) = tokio::fs::write(&temp_path, &bytes).await {
+    let mut file = match tokio::fs::File::create(&temp_path).await {
+        Ok(file) => file,
+        Err(error) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
+                .into_response();
+        }
+    };
+
+    let mut field = field;
+    loop {
+        match field.chunk().await {
+            Ok(Some(chunk)) => {
+                if let Err(error) = file.write_all(&chunk).await {
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+                    return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
+                        .into_response();
+                }
+            }
+            Ok(None) => break,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return api_error(StatusCode::BAD_REQUEST, &error.to_string()).into_response();
+            }
+        }
+    }
+
+    if let Err(error) = file.flush().await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()).into_response();
     }
+    drop(file);
 
     match state.inbox.deposit(&temp_path, &original_name).await {
         Ok(final_path) => Json(UploadResponse {

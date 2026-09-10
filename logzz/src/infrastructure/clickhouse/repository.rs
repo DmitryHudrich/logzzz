@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use clickhouse::Client;
-use eyre::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -8,9 +7,15 @@ use std::sync::Arc;
 
 use crate::domain::record::{AccountRecord, FileHash};
 use crate::domain::repository::{
-    CredentialRepository, GroupedCredential, SearchQuery, SearchType, SourceFilePathRecord,
-    SourceFileRecord, StoreMetrics,
+    CredentialRepository, GroupedCredential, RepositoryError, RepositoryResult, SearchQuery,
+    SearchType, SourceFilePathRecord, SourceFileRecord, StoreMetrics,
 };
+
+impl From<clickhouse::error::Error> for RepositoryError {
+    fn from(error: clickhouse::error::Error) -> Self {
+        RepositoryError::Backend(error.to_string())
+    }
+}
 
 #[derive(Debug, Serialize, clickhouse::Row)]
 struct CredRow {
@@ -100,11 +105,12 @@ impl ClickhouseCredentialRepository {
         Self { client }
     }
 
-    pub fn client(&self) -> &Arc<Client> {
-        &self.client
-    }
-
-    async fn write_tags(&self, cred_key: &str, tags: &[String], deleted: u8) -> Result<()> {
+    async fn write_tags(
+        &self,
+        cred_key: &str,
+        tags: &[String],
+        deleted: u8,
+    ) -> RepositoryResult<()> {
         let normalized: Vec<String> = tags
             .iter()
             .map(|t| t.trim().to_string())
@@ -178,22 +184,21 @@ fn tag_filter_clause(tags: &[String]) -> String {
 
 #[async_trait]
 impl CredentialRepository for ClickhouseCredentialRepository {
-    async fn insert_records(&self, records: &[AccountRecord]) -> Result<usize> {
-        let mut insert = self.client.insert::<CredRow>("creds").await?;
-        let mut inserted = 0usize;
-
-        for rec in records {
-            if let Some(row) = to_clickhouse_row(rec) {
-                insert.write(&row).await?;
-                inserted += 1;
-            }
+    async fn insert_records(&self, records: &[AccountRecord]) -> RepositoryResult<usize> {
+        let rows: Vec<CredRow> = records.iter().filter_map(to_clickhouse_row).collect();
+        if rows.is_empty() {
+            return Ok(0);
         }
 
+        let mut insert = self.client.insert::<CredRow>("creds").await?;
+        for row in &rows {
+            insert.write(row).await?;
+        }
         insert.end().await?;
-        Ok(inserted)
+        Ok(rows.len())
     }
 
-    async fn load_parsed_hashes(&self) -> Result<HashSet<FileHash>> {
+    async fn load_parsed_hashes(&self) -> RepositoryResult<HashSet<FileHash>> {
         let rows = self
             .client
             .query("SELECT file_hash FROM source_files")
@@ -203,7 +208,7 @@ impl CredentialRepository for ClickhouseCredentialRepository {
         Ok(rows.into_iter().map(|r| FileHash(r.file_hash)).collect())
     }
 
-    async fn load_seen_paths(&self) -> Result<HashMap<PathBuf, HashSet<FileHash>>> {
+    async fn load_seen_paths(&self) -> RepositoryResult<HashMap<PathBuf, HashSet<FileHash>>> {
         let rows = self
             .client
             .query("SELECT file_hash, path FROM source_file_paths")
@@ -220,38 +225,51 @@ impl CredentialRepository for ClickhouseCredentialRepository {
         Ok(map)
     }
 
-    async fn record_source_file(&self, row: SourceFileRecord) -> Result<()> {
+    async fn record_source_files(&self, rows: &[SourceFileRecord]) -> RepositoryResult<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
         let mut insert = self.client.insert::<SourceFileRow>("source_files").await?;
-        insert
-            .write(&SourceFileRow {
-                file_hash: row.file_hash,
-                file_size: row.file_size,
-                parse_status: row.parse_status,
-                error_message: row.error_message,
-            })
-            .await?;
+        for row in rows {
+            insert
+                .write(&SourceFileRow {
+                    file_hash: row.file_hash.clone(),
+                    file_size: row.file_size,
+                    parse_status: row.parse_status.clone(),
+                    error_message: row.error_message.clone(),
+                })
+                .await?;
+        }
         insert.end().await?;
         Ok(())
     }
 
-    async fn record_source_file_path(&self, row: SourceFilePathRecord) -> Result<()> {
+    async fn record_source_file_paths(
+        &self,
+        rows: &[SourceFilePathRecord],
+    ) -> RepositoryResult<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
         let mut insert = self
             .client
             .insert::<SourceFilePathRow>("source_file_paths")
             .await?;
-        insert
-            .write(&SourceFilePathRow {
-                file_hash: row.file_hash,
-                path: row.path,
-                modified_at: row.modified_at,
-                file_size: row.file_size,
-            })
-            .await?;
+        for row in rows {
+            insert
+                .write(&SourceFilePathRow {
+                    file_hash: row.file_hash.clone(),
+                    path: row.path.clone(),
+                    modified_at: row.modified_at,
+                    file_size: row.file_size,
+                })
+                .await?;
+        }
         insert.end().await?;
         Ok(())
     }
 
-    async fn search_grouped(&self, query: &SearchQuery) -> Result<Vec<GroupedCredential>> {
+    async fn search_grouped(&self, query: &SearchQuery) -> RepositoryResult<Vec<GroupedCredential>> {
         let pattern = format!("%{}%", query.term.to_lowercase());
         let sql = format!(
             "SELECT
@@ -293,7 +311,7 @@ impl CredentialRepository for ClickhouseCredentialRepository {
             .collect())
     }
 
-    async fn count_grouped(&self, query: &SearchQuery) -> Result<u64> {
+    async fn count_grouped(&self, query: &SearchQuery) -> RepositoryResult<u64> {
         let pattern = format!("%{}%", query.term.to_lowercase());
         let sql = format!(
             "SELECT count() FROM (
@@ -313,15 +331,15 @@ impl CredentialRepository for ClickhouseCredentialRepository {
         Ok(rows.first().map(|r| r.count).unwrap_or(0))
     }
 
-    async fn add_tags(&self, cred_key: &str, tags: &[String]) -> Result<()> {
+    async fn add_tags(&self, cred_key: &str, tags: &[String]) -> RepositoryResult<()> {
         self.write_tags(cred_key, tags, 0).await
     }
 
-    async fn remove_tags(&self, cred_key: &str, tags: &[String]) -> Result<()> {
+    async fn remove_tags(&self, cred_key: &str, tags: &[String]) -> RepositoryResult<()> {
         self.write_tags(cred_key, tags, 1).await
     }
 
-    async fn tags_for_keys(&self, keys: &[String]) -> Result<HashMap<String, Vec<String>>> {
+    async fn tags_for_keys(&self, keys: &[String]) -> RepositoryResult<HashMap<String, Vec<String>>> {
         if keys.is_empty() {
             return Ok(HashMap::new());
         }
@@ -344,7 +362,7 @@ impl CredentialRepository for ClickhouseCredentialRepository {
         Ok(map)
     }
 
-    async fn all_tags(&self) -> Result<Vec<String>> {
+    async fn all_tags(&self) -> RepositoryResult<Vec<String>> {
         let rows = self
             .client
             .query(
@@ -359,7 +377,7 @@ impl CredentialRepository for ClickhouseCredentialRepository {
         Ok(rows.into_iter().map(|r| r.tag).collect())
     }
 
-    async fn paths_for_hashes(&self, hashes: &[String]) -> Result<HashMap<String, Vec<String>>> {
+    async fn paths_for_hashes(&self, hashes: &[String]) -> RepositoryResult<HashMap<String, Vec<String>>> {
         if hashes.is_empty() {
             return Ok(HashMap::new());
         }
@@ -379,7 +397,7 @@ impl CredentialRepository for ClickhouseCredentialRepository {
         Ok(map)
     }
 
-    async fn metrics(&self) -> Result<StoreMetrics> {
+    async fn metrics(&self) -> RepositoryResult<StoreMetrics> {
         let creds = self
             .client
             .query("SELECT count() FROM creds")

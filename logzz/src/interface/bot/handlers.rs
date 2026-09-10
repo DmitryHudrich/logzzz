@@ -11,6 +11,38 @@ use super::html::{render_html_report, sanitize_filename};
 use super::state::{BotState, PAGE_SIZE, Session};
 use crate::domain::repository::SearchType;
 
+const REPORT_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+async fn cleanup_old_reports(results_dir: &str) {
+    let mut reader = match fs::read_dir(results_dir).await {
+        Ok(reader) => reader,
+        Err(_) => return,
+    };
+
+    while let Ok(Some(entry)) = reader.next_entry().await {
+        let path = entry.path();
+        let is_report = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("logzz_") && n.ends_with(".html"));
+        if !is_report {
+            continue;
+        }
+
+        let too_old = entry
+            .metadata()
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age > REPORT_TTL);
+
+        if too_old {
+            let _ = fs::remove_file(&path).await;
+        }
+    }
+}
+
 fn split_query_and_tags(input: &str) -> (String, Vec<String>) {
     let mut terms = Vec::new();
     let mut tags = Vec::new();
@@ -152,6 +184,8 @@ async fn start_search(
     tags: Vec<String>,
     search_type: &str,
 ) -> ResponseResult<()> {
+    state.prune_sessions();
+
     let search_id: u32 = rand::random();
     let chat_id = msg.chat.id.0;
 
@@ -181,6 +215,7 @@ async fn start_search(
             tags: tags.clone(),
             page: 0,
             has_next: false,
+            updated: std::time::Instant::now(),
         },
     );
 
@@ -237,6 +272,7 @@ async fn deliver_page(
             tags: tags.to_vec(),
             page,
             has_next,
+            updated: std::time::Instant::now(),
         },
     );
 
@@ -247,6 +283,7 @@ async fn deliver_page(
     let filepath = format!("{}/{}", state.results_dir, filename);
 
     fs::create_dir_all(&state.results_dir).await.ok();
+    cleanup_old_reports(&state.results_dir).await;
 
     if let Err(e) = fs::write(&filepath, &html).await {
         bot.send_message(chat, format!("❌ Failed to write report: {e}"))

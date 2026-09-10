@@ -43,10 +43,18 @@ impl SearchService {
         page: usize,
     ) -> Result<SearchPage> {
         let offset = page * self.page_size;
+        let mut dedup_tags: Vec<String> = tags
+            .iter()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+        dedup_tags.sort();
+        dedup_tags.dedup();
+
         let query = SearchQuery {
             term: term.to_string(),
             search_type,
-            tags: tags.to_vec(),
+            tags: dedup_tags,
             limit: self.page_size + 1,
             offset,
         };

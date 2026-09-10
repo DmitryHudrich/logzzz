@@ -1,9 +1,16 @@
 use async_trait::async_trait;
-use eyre::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::domain::record::{AccountRecord, FileHash};
+
+#[derive(Debug, thiserror::Error)]
+pub enum RepositoryError {
+    #[error("repository backend error: {0}")]
+    Backend(String),
+}
+
+pub type RepositoryResult<T> = Result<T, RepositoryError>;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum SearchType {
@@ -70,20 +77,27 @@ pub struct StoreMetrics {
 
 #[async_trait]
 pub trait CredentialRepository: Send + Sync {
-    async fn insert_records(&self, records: &[AccountRecord]) -> Result<usize>;
-    async fn load_parsed_hashes(&self) -> Result<HashSet<FileHash>>;
-    async fn load_seen_paths(&self) -> Result<HashMap<PathBuf, HashSet<FileHash>>>;
-    async fn record_source_file(&self, row: SourceFileRecord) -> Result<()>;
-    async fn record_source_file_path(&self, row: SourceFilePathRecord) -> Result<()>;
+    async fn insert_records(&self, records: &[AccountRecord]) -> RepositoryResult<usize>;
+    async fn load_parsed_hashes(&self) -> RepositoryResult<HashSet<FileHash>>;
+    async fn load_seen_paths(&self) -> RepositoryResult<HashMap<PathBuf, HashSet<FileHash>>>;
+    async fn record_source_files(&self, rows: &[SourceFileRecord]) -> RepositoryResult<()>;
+    async fn record_source_file_paths(
+        &self,
+        rows: &[SourceFilePathRecord],
+    ) -> RepositoryResult<()>;
 
-    async fn search_grouped(&self, query: &SearchQuery) -> Result<Vec<GroupedCredential>>;
-    async fn count_grouped(&self, query: &SearchQuery) -> Result<u64>;
-    async fn paths_for_hashes(&self, hashes: &[String]) -> Result<HashMap<String, Vec<String>>>;
+    async fn search_grouped(&self, query: &SearchQuery) -> RepositoryResult<Vec<GroupedCredential>>;
+    async fn count_grouped(&self, query: &SearchQuery) -> RepositoryResult<u64>;
+    async fn paths_for_hashes(
+        &self,
+        hashes: &[String],
+    ) -> RepositoryResult<HashMap<String, Vec<String>>>;
 
-    async fn add_tags(&self, cred_key: &str, tags: &[String]) -> Result<()>;
-    async fn remove_tags(&self, cred_key: &str, tags: &[String]) -> Result<()>;
-    async fn tags_for_keys(&self, keys: &[String]) -> Result<HashMap<String, Vec<String>>>;
-    async fn all_tags(&self) -> Result<Vec<String>>;
+    async fn add_tags(&self, cred_key: &str, tags: &[String]) -> RepositoryResult<()>;
+    async fn remove_tags(&self, cred_key: &str, tags: &[String]) -> RepositoryResult<()>;
+    async fn tags_for_keys(&self, keys: &[String])
+    -> RepositoryResult<HashMap<String, Vec<String>>>;
+    async fn all_tags(&self) -> RepositoryResult<Vec<String>>;
 
-    async fn metrics(&self) -> Result<StoreMetrics>;
+    async fn metrics(&self) -> RepositoryResult<StoreMetrics>;
 }

@@ -214,6 +214,49 @@ curl -H "Authorization: Bearer $LOGZZ_REST_API_TOKEN" \
 `main.rs` связывает слои: собирает реализации инфраструктуры и передаёт их сценариям
 через трейты.
 
+## Хранение и компрессия ClickHouse
+
+Схема оптимизирована под минимальный объём на диске:
+
+- **Кодеки сжатия.** Текстовые колонки (`url_raw`, `username_raw`, `password_raw`,
+  `extra_json`, пути, теги, хэши) сжимаются `ZSTD(3)` вместо дефолтного `LZ4` — для
+  такого текста это обычно в разы плотнее. Метки времени идут через
+  `DoubleDelta + ZSTD`, числовые размеры — через `T64 + ZSTD`.
+- **Сортировка для локальности.** `creds` теперь сортируется по
+  `(host_root, url_raw, username_raw, password_raw, ingest_time)`: одинаковые и близкие
+  записи лежат рядом, поэтому сжимаются заметно лучше (и группировка при поиске дешевле).
+- **LowCardinality** для колонок с малым числом значений (`source_file`,
+  `parse_status`, `host_*`).
+
+Как это применяется:
+
+- `migrations/001_init.sql` и `002_tags.sql` создают таблицы уже с кодеками — новые
+  инсталляции получают всё из коробки.
+- `migrations/003_storage_codecs.sql` навешивает кодеки на уже существующие таблицы
+  через `ALTER ... MODIFY COLUMN` (идемпотентно).
+
+Важно про существующие данные: `MODIFY COLUMN ... CODEC` — это изменение метаданных.
+Новые вставки сразу пишутся с новым сжатием, а старые куски пережимаются постепенно при
+фоновых слияниях. Чтобы пережать сразу и освободить место немедленно:
+
+```sql
+OPTIMIZE TABLE logzz.creds FINAL;
+OPTIMIZE TABLE logzz.source_file_paths FINAL;
+OPTIMIZE TABLE logzz.source_files FINAL;
+OPTIMIZE TABLE logzz.cred_tags FINAL;
+```
+
+Посмотреть выигрыш (сжатый vs несжатый размер по колонкам):
+
+```sql
+SELECT table, formatReadableSize(sum(data_compressed_bytes)) AS compressed,
+       formatReadableSize(sum(data_uncompressed_bytes)) AS uncompressed,
+       round(sum(data_uncompressed_bytes) / sum(data_compressed_bytes), 2) AS ratio
+FROM system.columns
+WHERE database = 'logzz'
+GROUP BY table ORDER BY table;
+```
+
 ## Access control
 
 Два места, которые по умолчанию **открыты для всех**, если явно не ограничить:

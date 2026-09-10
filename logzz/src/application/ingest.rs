@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use crate::domain::parser::parse_file;
+use crate::domain::record::{AccountRecord, FileHash};
 use crate::domain::repository::{CredentialRepository, SourceFilePathRecord, SourceFileRecord};
 use crate::infrastructure::archive::{
     ExtractError, archive_needs_password_path, archive_output_dir, archive_password_path,
@@ -76,11 +77,18 @@ fn now_unix() -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
+#[derive(Default)]
+struct DedupState {
+    parsed_hashes: HashSet<FileHash>,
+    seen_paths: HashMap<PathBuf, HashSet<FileHash>>,
+}
+
 pub struct IngestService {
     repo: Arc<dyn CredentialRepository>,
     input_dir: PathBuf,
     archive_dir: PathBuf,
     status: SharedImportStatus,
+    dedup: Mutex<Option<DedupState>>,
 }
 
 impl IngestService {
@@ -95,6 +103,7 @@ impl IngestService {
             input_dir: input_dir.into(),
             archive_dir: archive_dir.into(),
             status,
+            dedup: Mutex::new(None),
         }
     }
 
@@ -152,10 +161,25 @@ impl IngestService {
             .map(|(_, _, output_dir)| (output_dir.clone(), ArchiveParseSummary::default()))
             .collect::<HashMap<_, _>>();
 
-        let mut parsed_hashes = self.repo.load_parsed_hashes().await?;
-        let mut seen_paths = self.repo.load_seen_paths().await?;
+        let mut dedup_guard = self.dedup.lock().await;
+        if dedup_guard.is_none() {
+            *dedup_guard = Some(DedupState {
+                parsed_hashes: self.repo.load_parsed_hashes().await?,
+                seen_paths: self.repo.load_seen_paths().await?,
+            });
+        }
+        let dedup = dedup_guard.as_mut().expect("dedup initialized above");
 
-        for path in iter_files(&self.input_dir) {
+        let input_dir = self.input_dir.clone();
+        let files =
+            tokio::task::spawn_blocking(move || iter_files(&input_dir).collect::<Vec<PathBuf>>())
+                .await?;
+
+        let mut cred_rows: Vec<AccountRecord> = Vec::new();
+        let mut source_file_rows: Vec<SourceFileRecord> = Vec::new();
+        let mut source_path_rows: Vec<SourceFilePathRecord> = Vec::new();
+
+        for path in files {
             let tracked_output_dir = tracked_notifications.iter().find_map(|(_, _, output_dir)| {
                 path.starts_with(output_dir).then_some(output_dir.clone())
             });
@@ -167,11 +191,12 @@ impl IngestService {
                 }
             };
 
-            let file_size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-            let path_hashes = seen_paths.get(&path);
-            let same_path_same_hash =
-                path_hashes.is_some_and(|hashes| hashes.contains(&current_file_hash));
-            let parsed_before = parsed_hashes.contains(&current_file_hash);
+            let file_size = fs::metadata(&path).await.map(|meta| meta.len()).unwrap_or(0);
+            let same_path_same_hash = dedup
+                .seen_paths
+                .get(&path)
+                .is_some_and(|hashes| hashes.contains(&current_file_hash));
+            let parsed_before = dedup.parsed_hashes.contains(&current_file_hash);
 
             if same_path_same_hash {
                 stats.files_skipped += 1;
@@ -184,16 +209,15 @@ impl IngestService {
             }
 
             if parsed_before {
-                self.repo
-                    .record_source_file_path(SourceFilePathRecord {
-                        file_hash: current_file_hash.0.clone(),
-                        path: path.clone(),
-                        modified_at: None,
-                        file_size,
-                    })
-                    .await?;
+                source_path_rows.push(SourceFilePathRecord {
+                    file_hash: current_file_hash.0.clone(),
+                    path: path.clone(),
+                    modified_at: None,
+                    file_size,
+                });
 
-                seen_paths
+                dedup
+                    .seen_paths
                     .entry(path.clone())
                     .or_default()
                     .insert(current_file_hash);
@@ -207,34 +231,34 @@ impl IngestService {
             }
 
             let report = parse_file(&path);
-            let issues_found = report.issues().len();
-            let records_parsed = report.records().len();
+            let issues_found = report.issues.len();
+            let records_parsed = report.records.len();
+            let records_inserted = report.records.iter().filter(|r| is_insertable(r)).count();
             stats.files_parsed += 1;
             stats.records_parsed += records_parsed;
             stats.issues_found += issues_found;
-            let records_inserted = self.repo.insert_records(report.records()).await?;
             stats.records_inserted += records_inserted;
 
-            self.repo
-                .record_source_file(SourceFileRecord {
-                    file_hash: current_file_hash.0.clone(),
-                    file_size,
-                    parse_status: "parsed".to_string(),
-                    error_message: None,
-                })
-                .await?;
+            cred_rows.extend(report.records);
+            source_file_rows.push(SourceFileRecord {
+                file_hash: current_file_hash.0.clone(),
+                file_size,
+                parse_status: "parsed".to_string(),
+                error_message: None,
+            });
+            source_path_rows.push(SourceFilePathRecord {
+                file_hash: current_file_hash.0.clone(),
+                path: path.clone(),
+                modified_at: None,
+                file_size,
+            });
 
-            self.repo
-                .record_source_file_path(SourceFilePathRecord {
-                    file_hash: current_file_hash.0.clone(),
-                    path: path.clone(),
-                    modified_at: None,
-                    file_size,
-                })
-                .await?;
-
-            parsed_hashes.insert(current_file_hash.clone());
-            seen_paths.entry(path).or_default().insert(current_file_hash);
+            dedup.parsed_hashes.insert(current_file_hash.clone());
+            dedup
+                .seen_paths
+                .entry(path)
+                .or_default()
+                .insert(current_file_hash);
 
             if let Some(output_dir) = tracked_output_dir.as_ref()
                 && let Some(summary) = tracked_stats.get_mut(output_dir)
@@ -244,6 +268,12 @@ impl IngestService {
                 summary.issues_found += issues_found;
             }
         }
+
+        if let Err(error) = self.flush(&cred_rows, &source_file_rows, &source_path_rows).await {
+            *dedup_guard = None;
+            return Err(error);
+        }
+        drop(dedup_guard);
 
         let mut dirs_to_remove = extracted_paths;
         for (notification_path, mut notification, output_dir) in tracked_notifications {
@@ -269,15 +299,43 @@ impl IngestService {
 
         Ok(stats)
     }
+
+    async fn flush(
+        &self,
+        cred_rows: &[AccountRecord],
+        source_file_rows: &[SourceFileRecord],
+        source_path_rows: &[SourceFilePathRecord],
+    ) -> Result<()> {
+        self.repo.insert_records(cred_rows).await?;
+        self.repo.record_source_files(source_file_rows).await?;
+        self.repo.record_source_file_paths(source_path_rows).await?;
+        Ok(())
+    }
+}
+
+fn is_insertable(rec: &AccountRecord) -> bool {
+    rec.url().map(|u| !u.trim().is_empty()).unwrap_or(false)
+}
+
+async fn read_archive_dir(archive_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut reader = match fs::read_dir(archive_dir).await {
+        Ok(reader) => reader,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut archives = Vec::new();
+    while let Some(entry) = reader.next_entry().await? {
+        let path = entry.path();
+        if is_archive_file(&path) {
+            archives.push(path);
+        }
+    }
+    Ok(archives)
 }
 
 async fn process_pending_archives(archive_dir: &Path, input_dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut archives: Vec<PathBuf> = std::fs::read_dir(archive_dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| is_archive_file(path))
-        .collect();
-
+    let mut archives: Vec<PathBuf> = read_archive_dir(archive_dir).await?;
     archives.sort();
 
     let mut extracted = vec![];
@@ -366,11 +424,35 @@ async fn process_pending_archives(archive_dir: &Path, input_dir: &Path) -> Resul
                 }
             }
             Ok(Err(error)) => {
-                warn!(
-                    error = %error,
-                    archive_path = %archive_path.display(),
-                    "archive extraction failed; will retry later"
-                );
+                if password_str.is_some() {
+                    warn!(
+                        error = %error,
+                        archive_path = %archive_path.display(),
+                        "archive extraction failed with the supplied password; discarding it and \
+                         waiting for a new one"
+                    );
+                    if let Err(e) = fs::remove_file(&pass_path).await {
+                        warn!(error = %e, pass_path = %pass_path.display(), "failed to remove rejected password file");
+                    }
+                    if let Ok(Some(request)) = load_upload_request(&archive_path).await {
+                        let original_name = archive_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("archive")
+                            .to_string();
+                        if let Err(e) =
+                            write_needs_password_marker(&archive_path, &original_name, request).await
+                        {
+                            warn!(error = %e, "failed to refresh needs-password marker");
+                        }
+                    }
+                } else {
+                    warn!(
+                        error = %error,
+                        archive_path = %archive_path.display(),
+                        "archive extraction failed; will retry later"
+                    );
+                }
             }
             Err(error) => {
                 warn!(
