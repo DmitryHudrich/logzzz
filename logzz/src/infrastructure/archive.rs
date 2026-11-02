@@ -13,6 +13,7 @@ const RAR_EXTRACTORS: &[&str] = &["7z", "unrar"];
 pub const PARTIAL_SUFFIX: &str = ".part";
 pub const ARCHIVE_PASSWORD_SUFFIX: &str = ".pass";
 pub const ARCHIVE_NEEDS_PASSWORD_SUFFIX: &str = ".needs-password";
+pub const ARCHIVE_FAILED_SUFFIX: &str = ".failed";
 
 /// Hard cap on total bytes written per archive extraction, as a guard against zip bombs
 /// (a small compressed archive that inflates to consume all available disk space).
@@ -25,6 +26,8 @@ const MAX_EXTRACTED_ENTRIES: usize = 200_000;
 pub enum ExtractError {
     #[error("archive is password protected")]
     PasswordRequired,
+    #[error("the supplied password was rejected by the archive")]
+    WrongPassword,
     #[error("extraction failed: {0}")]
     Failed(String),
     #[error("archive exceeds the {MAX_EXTRACTED_BYTES} byte extraction limit (possible zip bomb)")]
@@ -83,6 +86,18 @@ pub fn archive_needs_password_path(archive_path: &Path) -> PathBuf {
         .and_then(|name| name.to_str())
         .map(|name| format!("{name}{ARCHIVE_NEEDS_PASSWORD_SUFFIX}"))
         .unwrap_or_else(|| format!("archive{ARCHIVE_NEEDS_PASSWORD_SUFFIX}"));
+    archive_path.with_file_name(file_name)
+}
+
+/// Sidecar marker written next to an archive that failed extraction for a reason that is
+/// not a password problem (e.g. unrar "cannot create file"). Its presence tells the
+/// ingest loop to stop retrying the archive instead of re-attempting it on every poll.
+pub fn archive_failed_path(archive_path: &Path) -> PathBuf {
+    let file_name = archive_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| format!("{name}{ARCHIVE_FAILED_SUFFIX}"))
+        .unwrap_or_else(|| format!("archive{ARCHIVE_FAILED_SUFFIX}"));
     archive_path.with_file_name(file_name)
 }
 
@@ -237,8 +252,13 @@ fn extract_zip(
 
     for i in 0..zip.len() {
         let mut entry = if let Some(pwd) = password {
-            zip.by_index_decrypt(i, pwd.as_bytes())
-                .map_err(|e| ExtractError::Failed(e.to_string()))?
+            match zip.by_index_decrypt(i, pwd.as_bytes()) {
+                Ok(entry) => entry,
+                Err(zip::result::ZipError::InvalidPassword) => {
+                    return Err(ExtractError::WrongPassword);
+                }
+                Err(e) => return Err(ExtractError::Failed(e.to_string())),
+            }
         } else {
             match zip.by_index(i) {
                 Ok(entry) => entry,
@@ -319,8 +339,11 @@ fn copy_limited<R: io::Read, W: io::Write>(
 enum ExtractorRun {
     /// The tool ran and reported success; files are on disk.
     Extracted,
-    /// The tool reported that the archive is encrypted / needs a password.
+    /// The tool reported that the archive is encrypted / needs a password, and none was
+    /// supplied.
     PasswordRequired,
+    /// A password was supplied but the tool reported it as wrong.
+    WrongPassword,
     /// The tool ran but exited non-zero for some other reason (carries a message).
     Failed(String),
     /// The tool binary is not installed on this system.
@@ -344,6 +367,7 @@ fn extract_rar(
         match run_rar_extractor(tool, archive_path, output_dir, password) {
             ExtractorRun::Extracted => return finalize_rar_extraction(output_dir),
             ExtractorRun::PasswordRequired => return Err(ExtractError::PasswordRequired),
+            ExtractorRun::WrongPassword => return Err(ExtractError::WrongPassword),
             ExtractorRun::Failed(message) => {
                 if looks_like_create_conflict(&message) && dir_contains_files(output_dir) {
                     tracing::warn!(
@@ -460,31 +484,92 @@ fn run_rar_extractor(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    // Only classify as "needs password" when the caller supplied none: a supplied-but-wrong
-    // password is a hard failure, not a prompt to keep waiting for a password file.
-    if password.is_none() {
-        let lower = combined.to_lowercase();
-        if lower.contains("wrong password")
-            || lower.contains("encrypted")
-            || lower.contains("enter password")
-            || lower.contains("password incorrect")
-        {
-            return ExtractorRun::PasswordRequired;
-        }
+    let lower = combined.to_lowercase();
+    let code = output.status.code().unwrap_or(-1);
+
+    // Distinguish an authentication problem (the password is wrong or missing) from every
+    // other extraction failure. Crucially, a non-zero exit is NOT by itself a password
+    // problem: unrar exits 9 on "cannot create file", 5 on write error, 6 on open error,
+    // etc. — all with a correct password. Treating those as a bad password is what made the
+    // bot discard a working password and loop asking for a new one.
+    if is_password_failure(&lower, code) {
+        return if password.is_some() {
+            ExtractorRun::WrongPassword
+        } else {
+            ExtractorRun::PasswordRequired
+        };
+    }
+    // When no password was supplied, an archive that merely reports it is encrypted still
+    // needs one, even though that is not a "wrong password" signal.
+    if password.is_none() && archive_is_encrypted(&lower) {
+        return ExtractorRun::PasswordRequired;
     }
 
-    let code = output.status.code().unwrap_or(-1);
-    let detail = combined
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("");
+    let detail = summarize_extractor_error(&combined);
     if detail.is_empty() {
         ExtractorRun::Failed(format!("`{tool}` exited with code {code}"))
     } else {
         ExtractorRun::Failed(format!("`{tool}` exited with code {code}: {detail}"))
     }
+}
+
+/// Classifies extractor output as a password problem: the supplied password was rejected,
+/// or (with no password) the archive is encrypted and one is required. Keyed on the
+/// explicit wrong-password wording that 7z and unrar emit, plus unrar's dedicated bad
+/// password exit code 11. A bare CRC error (unrar code 3) is intentionally NOT treated as
+/// a password failure here, because it also occurs on genuinely corrupt data; it is only a
+/// password signal when accompanied by the wording below.
+fn is_password_failure(lower: &str, code: i32) -> bool {
+    code == 11
+        || lower.contains("wrong password")
+        || lower.contains("incorrect password")
+        || lower.contains("password incorrect")
+        || lower.contains("password is incorrect")
+        || lower.contains("the specified password")
+        || lower.contains("bad password")
+}
+
+/// Whether the extractor is telling us the archive is encrypted (used only when the caller
+/// supplied no password, to decide we should ask for one).
+fn archive_is_encrypted(lower: &str) -> bool {
+    lower.contains("encrypted")
+        || lower.contains("enter password")
+        || lower.contains("password required")
+        || lower.contains("requires a password")
+}
+
+/// Builds a concise, informative failure message from an extractor's combined output.
+///
+/// Per-file errors such as unrar's "Cannot create <path>" pinpoint why extraction failed
+/// (most often an over-long or invalid path on the target filesystem), so they are
+/// preferred over the generic trailing summary line, which on its own leaves the operator
+/// guessing. Falls back to the last non-empty line when no concrete error line is found.
+fn summarize_extractor_error(combined: &str) -> String {
+    let mut concrete: Vec<&str> = Vec::new();
+    for line in combined.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let l = line.to_lowercase();
+        let is_concrete = l.contains("cannot create")
+            || l.contains("cannot open")
+            || l.contains("write error")
+            || l.contains("no space left")
+            || l.contains("file name too long")
+            || l.contains("name too long")
+            || l.contains("permission denied");
+        if is_concrete && !concrete.contains(&line) {
+            concrete.push(line);
+        }
+    }
+    if !concrete.is_empty() {
+        // Keep the message bounded; the first few offending files convey the pattern.
+        return concrete.into_iter().take(3).collect::<Vec<_>>().join("; ");
+    }
+    combined
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Walks the extracted output to count files and enforce the zip/rar-bomb guards.
@@ -589,6 +674,60 @@ mod tests {
             "`unrar` exited with code 3: CRC failed"
         ));
         assert!(!looks_like_create_conflict("code 9: file exists but crc failed"));
+    }
+
+    #[test]
+    fn create_error_is_not_classified_as_a_password_failure() {
+        // unrar exit 9 ("cannot create file") must never be read as a bad password: this
+        // is the regression that made the bot discard a correct password and loop.
+        assert!(!is_password_failure("cannot create data/creds.txt", 9));
+        assert!(!is_password_failure("write error", 5));
+        assert!(!is_password_failure("crc failed in encrypted file", 3));
+    }
+
+    #[test]
+    fn wrong_password_wording_and_code_11_are_password_failures() {
+        assert!(is_password_failure("the specified password is incorrect", 11));
+        assert!(is_password_failure("wrong password for data.txt", 3));
+        assert!(is_password_failure("", 11));
+        assert!(is_password_failure("password incorrect", 255));
+    }
+
+    #[test]
+    fn encrypted_notice_only_counts_when_no_password_was_tried() {
+        assert!(archive_is_encrypted("archive is encrypted"));
+        assert!(archive_is_encrypted("enter password for data.txt"));
+        assert!(!archive_is_encrypted("cannot create data/creds.txt"));
+    }
+
+    #[test]
+    fn summarize_extractor_error_prefers_concrete_create_failures() {
+        let output = "\
+Extracting from archive.rar
+Creating    data
+Cannot create data/very-long-name.txt
+No files to extract
+unrar exited";
+        assert_eq!(
+            summarize_extractor_error(output),
+            "Cannot create data/very-long-name.txt"
+        );
+    }
+
+    #[test]
+    fn summarize_extractor_error_falls_back_to_last_line() {
+        assert_eq!(
+            summarize_extractor_error("line one\n\nFatal error\n  "),
+            "Fatal error"
+        );
+    }
+
+    #[test]
+    fn archive_failed_path_appends_suffix() {
+        assert_eq!(
+            archive_failed_path(Path::new("/tmp/archives/0000000001-sample.rar")),
+            Path::new("/tmp/archives/0000000001-sample.rar.failed")
+        );
     }
 
     #[test]

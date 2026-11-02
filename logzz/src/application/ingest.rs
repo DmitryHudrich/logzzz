@@ -12,8 +12,8 @@ use crate::domain::parser::parse_file;
 use crate::domain::record::{AccountRecord, FileHash};
 use crate::domain::repository::{CredentialRepository, SourceFilePathRecord, SourceFileRecord};
 use crate::infrastructure::archive::{
-    ExtractError, archive_needs_password_path, archive_output_dir, archive_password_path,
-    extract_archive, is_archive_file,
+    ExtractError, archive_failed_path, archive_needs_password_path, archive_output_dir,
+    archive_password_path, extract_archive, is_archive_file,
 };
 use crate::infrastructure::files::{file_hash, iter_files};
 use crate::infrastructure::telegram_ipc::{
@@ -219,7 +219,10 @@ impl IngestService {
                 }
             };
 
-            let file_size = fs::metadata(&path).await.map(|meta| meta.len()).unwrap_or(0);
+            let file_size = fs::metadata(&path)
+                .await
+                .map(|meta| meta.len())
+                .unwrap_or(0);
             let same_path_same_hash = dedup
                 .seen_paths
                 .get(&path)
@@ -306,7 +309,10 @@ impl IngestService {
             }
         }
 
-        if let Err(error) = self.flush(&cred_rows, &source_file_rows, &source_path_rows).await {
+        if let Err(error) = self
+            .flush(&cred_rows, &source_file_rows, &source_path_rows)
+            .await
+        {
             *dedup_guard = None;
             return Err(error);
         }
@@ -411,6 +417,18 @@ async fn process_pending_archives(
         let archive_name = archive_name_of(&archive_path);
         let needs_password_path = archive_needs_password_path(&archive_path);
         let pass_path = archive_password_path(&archive_path);
+        let failed_path = archive_failed_path(&archive_path);
+
+        // A hard, non-password failure leaves this marker behind so the archive is not
+        // retried on every poll (which would spam identical failures). The user can retry
+        // by re-sending the archive, which arrives under a fresh name.
+        if failed_path.exists() {
+            debug!(
+                archive_path = %archive_path.display(),
+                "skipping archive that previously failed extraction"
+            );
+            continue;
+        }
 
         let password_str: Option<String> = if pass_path.exists() {
             match fs::read_to_string(&pass_path).await {
@@ -497,37 +515,45 @@ async fn process_pending_archives(
                     events.emit(AppEvent::needs_password(archive_name.clone()));
                 }
             }
-            Ok(Err(error)) => {
-                if password_str.is_some() {
-                    warn!(
-                        error = %error,
-                        archive_path = %archive_path.display(),
-                        "archive extraction failed with the supplied password; discarding it and \
-                         waiting for a new one"
-                    );
-                    if let Err(e) = fs::remove_file(&pass_path).await {
-                        warn!(error = %e, pass_path = %pass_path.display(), "failed to remove rejected password file");
-                    }
-                    let request = load_upload_request(&archive_path)
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| ArchiveUploadRequest::local(&archive_name));
-                    if let Err(e) =
-                        write_needs_password_marker(&archive_path, &archive_name, request).await
-                    {
-                        warn!(error = %e, "failed to refresh needs-password marker");
-                    }
-                    events.emit(AppEvent::failed(archive_name.clone(), error.to_string()));
-                    events.emit(AppEvent::needs_password(archive_name.clone()));
-                } else {
-                    warn!(
-                        error = %error,
-                        archive_path = %archive_path.display(),
-                        "archive extraction failed; will retry later"
-                    );
-                    events.emit(AppEvent::failed(archive_name.clone(), error.to_string()));
+            Ok(Err(ExtractError::WrongPassword)) => {
+                warn!(
+                    archive_path = %archive_path.display(),
+                    "supplied password was rejected by the archive; discarding it and waiting \
+                     for a new one"
+                );
+                if let Err(e) = fs::remove_file(&pass_path).await {
+                    warn!(error = %e, pass_path = %pass_path.display(), "failed to remove rejected password file");
                 }
+                let request = load_upload_request(&archive_path)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| ArchiveUploadRequest::local(&archive_name));
+                if let Err(e) =
+                    write_needs_password_marker(&archive_path, &archive_name, request).await
+                {
+                    warn!(error = %e, "failed to refresh needs-password marker");
+                }
+                events.emit(AppEvent::needs_password(archive_name.clone()));
+            }
+            Ok(Err(error)) => {
+                // A failure that is not about the password (e.g. unrar "cannot create
+                // file", a write/disk error, an unsupported archive). Keep any supplied
+                // password rather than discarding a working one, stop re-prompting, and
+                // record a marker so the archive is not retried endlessly.
+                warn!(
+                    error = %error,
+                    archive_path = %archive_path.display(),
+                    has_password = password_str.is_some(),
+                    "archive extraction failed for a non-password reason; marking it failed"
+                );
+                if let Err(e) = remove_needs_password_marker(&archive_path).await {
+                    warn!(error = %e, "failed to remove needs-password marker after failure");
+                }
+                if let Err(e) = fs::write(&failed_path, error.to_string()).await {
+                    warn!(error = %e, failed_path = %failed_path.display(), "failed to write extraction-failed marker");
+                }
+                events.emit(AppEvent::failed(archive_name.clone(), error.to_string()));
             }
             Err(error) => {
                 warn!(

@@ -24,7 +24,7 @@ use crate::domain::credential_key;
 use crate::domain::repository::{CredentialRepository, SearchType};
 use crate::domain::source::ArchiveInbox;
 use crate::infrastructure::archive::{
-    archive_needs_password_path, archive_password_path, is_archive_file,
+    archive_failed_path, archive_needs_password_path, archive_password_path, is_archive_file,
 };
 use dto::{
     ApiError, CredentialDto, HealthResponse, MetricsResponse, OkResponse, SearchResponse,
@@ -369,7 +369,9 @@ async fn archive_queue(State(state): State<RestState>) -> Response {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        let status = if archive_password_path(&path).exists() {
+        let status = if archive_failed_path(&path).exists() {
+            "failed"
+        } else if archive_password_path(&path).exists() {
             "password_submitted"
         } else if archive_needs_password_path(&path).exists() {
             "needs_password"
