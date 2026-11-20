@@ -24,6 +24,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM debian:bookworm-slim
 
+# unrar transcodes archive entry names into the process locale; under the default C/POSIX
+# locale any non-ASCII name (these archives routinely contain emoji, e.g. "💰 … .txt")
+# collapses to "?" and extraction dies with code 9 "Cannot create …/?…". C.UTF-8 is built
+# into glibc on bookworm (no locales package needed), so set it for all extractors.
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+
 # `unrar` (RARLAB, non-free) reliably handles RAR3 and RAR5; p7zip's bundled RAR codec
 # chokes on RAR5, so it is kept only as a secondary extractor. Enabling `non-free` is
 # required to pull `unrar` on Debian bookworm. bookworm-slim ships the deb822
